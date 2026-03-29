@@ -148,6 +148,8 @@ class Agent:
         max_rounds = self.config.max_tool_rounds
         for round_idx in range(max_rounds):
             tools = self._build_tool_list()
+            # 在发送给 LLM 之前进行上下文压缩
+            messages = self.context_compressor.compress(messages)
 
             final_content = ""
             tool_calls_acc: list[Any] = []
