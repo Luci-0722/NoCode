@@ -11,7 +11,7 @@ from src.core.prompt import PromptManager
 from src.core.memory import ShortTermMemory, LongTermMemory
 from src.scheduler.scheduler import TaskScheduler
 from src.skills.registry import SkillRegistry
-from src.tools import ToolRegistry
+from src.core.tools import ToolRegistry
 from src.tools.bash import BashTool
 from src.core import AgentConfig, Message
 

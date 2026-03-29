@@ -1,9 +1,8 @@
-"""内置工具模块。
+"""具体内置工具实现。
 
-Tool（内置工具）是 Agent 核心基础设施的一部分，始终可用，与 Skill（技能插件）是两个独立的系统。
+抽象基类和注册中心在 src.core.tools 中，这里只放具体工具。
 """
 
-from src.tools.base import BaseTool, ToolResult
-from src.tools.registry import ToolRegistry
+from src.tools.bash import BashTool
 
-__all__ = ["BaseTool", "ToolResult", "ToolRegistry"]
+__all__ = ["BashTool"]

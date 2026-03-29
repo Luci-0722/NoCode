@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from src.core import ToolDefinition
-from src.tools.base import BaseTool
+from src.core.tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
 
