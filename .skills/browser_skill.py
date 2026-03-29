@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from src.skills.registry import Skill, SkillRegistry
+from src.core.skills import Skill, SkillRegistry
 
 logger = logging.getLogger(__name__)
 

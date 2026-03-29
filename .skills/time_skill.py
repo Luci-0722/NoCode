@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from src.skills.registry import Skill, SkillRegistry
+from src.core.skills import Skill, SkillRegistry
 
 
 async def get_current_time(**kwargs: Any) -> str:

@@ -6,7 +6,7 @@ import platform
 import os
 from typing import Any
 
-from src.skills.registry import Skill, SkillRegistry
+from src.core.skills import Skill, SkillRegistry
 
 
 async def get_system_info(**kwargs: Any) -> str:

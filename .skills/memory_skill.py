@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from src.skills.registry import Skill, SkillRegistry
+from src.core.skills import Skill, SkillRegistry
 
 
 class MemoryAccessor:
