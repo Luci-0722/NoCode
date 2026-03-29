@@ -84,7 +84,7 @@ class AgentConfig:
     max_tokens: int = 4096
     temperature: float = 0.7
     system_prompt: str = ""
-    prompts_dir: str = "prompts"
+    prompts_dir: str = "src/prompts"
     max_short_term_messages: int = 50
     max_tool_rounds: int = 10
     max_context_tokens: int = 8000
