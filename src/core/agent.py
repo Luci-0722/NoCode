@@ -6,9 +6,9 @@ import logging
 from typing import Any, AsyncIterator
 
 from src.core.llm_client import LLMClient
-from src.memory import ContextCompressor
-from src.prompt import PromptManager
-from src.memory import ShortTermMemory, LongTermMemory
+from src.core.memory import ContextCompressor
+from src.core.prompt import PromptManager
+from src.core.memory import ShortTermMemory, LongTermMemory
 from src.scheduler.scheduler import TaskScheduler
 from src.skills.registry import SkillRegistry
 from src.tools import ToolRegistry
