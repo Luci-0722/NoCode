@@ -1,20 +1,22 @@
-"""LLM client wrapping OpenAI SDK for GLM-compatible APIs."""
+"""OpenAI 兼容 API 提供者（智谱 GLM 等）。"""
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, AsyncIterator
 
 from openai import AsyncOpenAI
 
 from src.core import AgentConfig, Message, Role, ToolCall, ToolDefinition
+from src.core.provider.base import BaseProvider
 
 logger = logging.getLogger(__name__)
 
 
-class LLMClient:
-    def __init__(self, config: AgentConfig):
+class OpenAICompatibleProvider(BaseProvider):
+    """基于 OpenAI SDK 的兼容提供者，适用于智谱 GLM 等兼容 API。"""
+
+    def __init__(self, config: AgentConfig) -> None:
         self.config = config
         self.client = AsyncOpenAI(
             api_key=config.api_key,

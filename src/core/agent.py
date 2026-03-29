@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, AsyncIterator
 
-from src.core.llm_client import LLMClient
+from src.core.provider import BaseProvider, OpenAICompatibleProvider
 from src.core.memory import ContextCompressor
 from src.core.prompt import PromptManager
 from src.core.memory import ShortTermMemory, LongTermMemory
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class Agent:
     def __init__(self, config: AgentConfig):
         self.config = config
-        self.llm = LLMClient(config)
+        self.llm: BaseProvider = OpenAICompatibleProvider(config)
         self.short_term = ShortTermMemory(config.max_short_term_messages)
         self.long_term = LongTermMemory(config.data_dir + "/memory.db")
         self.skills = SkillRegistry()
