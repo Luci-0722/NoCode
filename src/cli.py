@@ -14,7 +14,7 @@ from rich.prompt import Prompt
 from rich.text import Text
 
 from src.agent.loop import Agent
-from src.types import AgentConfig
+from src.core import AgentConfig
 
 logger = logging.getLogger(__name__)
 console = Console()

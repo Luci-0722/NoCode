@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from src.types import Message
+from src.core import Message
 
 logger = logging.getLogger(__name__)
 

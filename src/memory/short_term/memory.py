@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 
-from src.types import Message
+from src.core import Message
 
 
 class ShortTermMemory:

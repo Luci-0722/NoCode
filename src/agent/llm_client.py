@@ -8,7 +8,7 @@ from typing import Any, AsyncIterator
 
 from openai import AsyncOpenAI
 
-from src.types import AgentConfig, Message, Role, ToolCall, ToolDefinition
+from src.core import AgentConfig, Message, Role, ToolCall, ToolDefinition
 
 logger = logging.getLogger(__name__)
 

@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Coroutine
 
-from src.types import ToolDefinition
+from src.core import ToolDefinition
 
 logger = logging.getLogger(__name__)
 

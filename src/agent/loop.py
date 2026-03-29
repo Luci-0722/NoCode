@@ -13,7 +13,7 @@ from src.scheduler.scheduler import TaskScheduler
 from src.skills.registry import SkillRegistry
 from src.tools import ToolRegistry
 from src.tools.bash import BashTool
-from src.types import AgentConfig, Message
+from src.core import AgentConfig, Message
 
 logger = logging.getLogger(__name__)
 

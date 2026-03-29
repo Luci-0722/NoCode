@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.types import ToolDefinition
+from src.core import ToolDefinition
 
 
 @dataclass

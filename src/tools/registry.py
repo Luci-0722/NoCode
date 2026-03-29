@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from src.types import ToolDefinition
+from src.core import ToolDefinition
 from src.tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
