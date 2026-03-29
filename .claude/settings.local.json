@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(source .venv/bin/activate)",
+      "Bash(pip install:*)",
+      "Bash(brew install:*)",
+      "Bash(rm -rf .venv)",
+      "Bash(/opt/homebrew/bin/python3.12 -m venv .venv)"
+    ]
+  }
+}
