@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import logging
-import os
-import re
 from pathlib import Path
 from typing import Any
+
+import re
 
 logger = logging.getLogger(__name__)
 
 # 变量插值的正则模式，匹配 {{variable}} 语法
 _VAR_PATTERN = re.compile(r"\{\{(\w+)\}\}")
+
+# 支持的模板文件扩展名
+_TEMPLATE_EXTENSIONS = {".md", ".txt", ".prompt"}
 
 
 class PromptManager:
@@ -19,6 +22,7 @@ class PromptManager:
 
     支持简单的 {{variable}} 语法进行变量替换，
     不依赖 Jinja2，使用手动正则替换实现。
+    模板文件推荐使用 Markdown 格式（.md）。
     """
 
     def __init__(self, prompts_dir: str = "prompts") -> None:
@@ -30,7 +34,6 @@ class PromptManager:
         self.prompts_dir = Path(prompts_dir)
         self._templates: dict[str, str] = {}
 
-        # 如果目录存在，则加载所有模板
         if self.prompts_dir.is_dir():
             self._load_all_templates()
             logger.info("已加载 %d 个提示词模板，目录: %s", len(self._templates), self.prompts_dir)
@@ -40,8 +43,7 @@ class PromptManager:
     def _load_all_templates(self) -> None:
         """从目录中加载所有模板文件。"""
         for file_path in sorted(self.prompts_dir.iterdir()):
-            if file_path.is_file() and file_path.suffix in (".j2", ".txt", ".prompt"):
-                # 使用文件名（不含扩展名）作为模板名称
+            if file_path.is_file() and file_path.suffix in _TEMPLATE_EXTENSIONS:
                 name = file_path.stem
                 content = file_path.read_text(encoding="utf-8")
                 self._templates[name] = content
@@ -66,7 +68,6 @@ class PromptManager:
 
         template = self._templates[name]
 
-        # 执行变量替换
         def _replacer(match: re.Match) -> str:
             var_name = match.group(1)
             if var_name not in kwargs:
@@ -74,28 +75,16 @@ class PromptManager:
                     f"模板 '{name}' 中引用了未提供的变量: {{{{{var_name}}}}}"
                 )
             value = kwargs[var_name]
-            # 如果值为 None，替换为空字符串
             return str(value) if value is not None else ""
 
         return _VAR_PATTERN.sub(_replacer, template)
 
     def has_prompt(self, name: str) -> bool:
-        """检查指定名称的提示词模板是否存在。
-
-        Args:
-            name: 模板名称。
-
-        Returns:
-            模板是否存在。
-        """
+        """检查指定名称的提示词模板是否存在。"""
         return name in self._templates
 
     def list_prompts(self) -> list[str]:
-        """列出所有已加载的提示词模板名称。
-
-        Returns:
-            模板名称列表（按字母排序）。
-        """
+        """列出所有已加载的提示词模板名称。"""
         return sorted(self._templates.keys())
 
     def reload(self) -> None:

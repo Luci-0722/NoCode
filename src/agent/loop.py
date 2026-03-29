@@ -7,9 +7,9 @@ from typing import Any, AsyncIterator
 
 from src.agent.llm_client import LLMClient
 from src.core.context import ContextCompressor
-from src.core.prompt_manager import PromptManager
-from src.memory.short_term import ShortTermMemory
-from src.memory.long_term import LongTermMemory
+from src.prompt import PromptManager
+from src.short_memory import ShortTermMemory
+from src.long_memory import LongTermMemory
 from src.scheduler.scheduler import TaskScheduler
 from src.skills.registry import SkillRegistry
 from src.tools import ToolRegistry
