@@ -13,7 +13,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.text import Text
 
-from src.agent.loop import Agent
+from src.core.agent import Agent
 from src.core import AgentConfig
 
 logger = logging.getLogger(__name__)
