@@ -52,8 +52,8 @@ def create_bf_agent(
         middleware=[
             SummarizationMiddleware(
                 model=llm,
-                trigger={"tokens": trigger_tokens},
-                keep={"messages": keep_messages},
+                trigger=("tokens", trigger_tokens),
+                keep=("messages", keep_messages),
             ),
         ],
     )
