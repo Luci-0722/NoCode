@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -53,7 +54,7 @@ def build_agent(config: dict):
     )
 
 
-def run_chat(agent):
+async def run_chat(agent):
     console.print(BANNER)
     console.print("[dim]命令: /quit 退出 | /clear 清除对话 | /help 帮助[/dim]\n")
 
@@ -96,7 +97,7 @@ def run_chat(agent):
         # 流式调用 agent（v2 格式）
         try:
             console.print()
-            for chunk in agent.stream(
+            async for chunk in agent.astream(
                 {"messages": [{"role": "user", "content": user_input}]},
                 config=config,
                 stream_mode="messages",
@@ -129,7 +130,7 @@ def main():
     config = load_config()
     agent = build_agent(config)
     try:
-        run_chat(agent)
+        asyncio.run(run_chat(agent))
     except KeyboardInterrupt:
         pass
 
