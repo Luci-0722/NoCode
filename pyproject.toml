@@ -1,14 +1,14 @@
 [project]
 name = "best-friend"
-version = "0.1.0"
+version = "0.2.0"
 description = "Your personal AI agent companion"
 requires-python = ">=3.12"
 dependencies = [
-    "openai>=1.58.0",
+    "langchain>=0.3.0",
+    "langchain-openai>=0.3.0",
+    "langgraph>=0.4.0",
     "rich>=13.9.0",
-    "apscheduler>=3.10.4",
     "pyyaml>=6.0.2",
-    "playwright>=1.58.0",
 ]
 
 [project.optional-dependencies]
