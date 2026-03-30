@@ -1,11 +1,12 @@
-"""自定义上下文压缩策略。
+"""自定义上下文压缩策略（Middleware 模式）。
 
 支持基于 token 阈值的自动压缩，优先删除可压缩工具（如 read、bash）的调用结果。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 from langchain_core.messages import (
     AIMessage,
@@ -13,6 +14,25 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+
+
+# ── Middleware 接口 ──────────────────────────────────────────────
+
+
+class Middleware(ABC):
+    """消息处理中间件基类。
+
+    每次模型调用前，Agent 会依次执行所有 middleware 的 process 方法，
+    对消息列表进行变换（如压缩、注入、过滤等）。
+    """
+
+    @abstractmethod
+    def process(self, messages: list[BaseMessage]) -> list[BaseMessage]:
+        """处理消息列表，返回处理后的新列表。"""
+        ...
+
+
+# ── 压缩策略 ────────────────────────────────────────────────────
 
 
 @dataclass
@@ -55,11 +75,7 @@ class ContextCompressor:
         self.strategy = strategy or CompressionStrategy()
 
     def compress(self, messages: list[BaseMessage]) -> list[BaseMessage]:
-        """对消息列表应用压缩策略，返回压缩后的新列表。
-
-        注意：此方法不修改原始消息列表，也不影响 checkpoint 中的持久化状态，
-        仅在每次模型调用前提供压缩视图。
-        """
+        """对消息列表应用压缩策略，返回压缩后的新列表。"""
         if _estimate_tokens(messages) <= self.strategy.trigger_tokens:
             return messages
 
@@ -77,7 +93,7 @@ class ContextCompressor:
         # 分离最近消息和旧消息
         keep = strategy.keep_recent
         if len(non_system) <= keep:
-            return messages  # 没有可压缩的旧消息
+            return messages
 
         recent = non_system[-keep:]
         old = non_system[:-keep]
@@ -89,16 +105,14 @@ class ContextCompressor:
                 tool_ids_to_remove.add(msg.tool_call_id)
 
         if not tool_ids_to_remove:
-            return messages  # 没有可压缩的工具结果
+            return messages
 
         # 重建旧消息：删除目标工具结果和对应的工具调用
         cleaned_old: list[BaseMessage] = []
         for msg in old:
-            # 跳过被标记删除的工具结果
             if isinstance(msg, ToolMessage) and msg.tool_call_id in tool_ids_to_remove:
                 continue
 
-            # 清理 AI 消息中被删除工具的调用记录
             if isinstance(msg, AIMessage) and msg.tool_calls:
                 kept_calls = [
                     tc for tc in msg.tool_calls if tc["id"] not in tool_ids_to_remove
@@ -106,10 +120,20 @@ class ContextCompressor:
                 if kept_calls:
                     msg = msg.model_copy(update={"tool_calls": kept_calls})
                 elif not msg.content:
-                    continue  # 无内容也无工具调用的空消息，整体删除
+                    continue
                 else:
                     msg = msg.model_copy(update={"tool_calls": []})
 
             cleaned_old.append(msg)
 
         return system + cleaned_old + recent
+
+
+class CompressionMiddleware(Middleware):
+    """压缩中间件：将 ContextCompressor 适配为 Middleware 接口。"""
+
+    def __init__(self, strategy: CompressionStrategy | None = None):
+        self._compressor = ContextCompressor(strategy)
+
+    def process(self, messages: list[BaseMessage]) -> list[BaseMessage]:
+        return self._compressor.compress(messages)

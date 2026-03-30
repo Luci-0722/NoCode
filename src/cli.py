@@ -1,4 +1,4 @@
-"""CLI 入口：Rich REPL + v2 流式输出。"""
+"""CLI 入口：Rich REPL + 流式输出。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import asyncio
 import logging
 import os
 import sys
-import uuid
 
 import yaml
 from rich.console import Console
@@ -57,9 +56,6 @@ async def run_chat(agent):
     console.print(BANNER)
     console.print("[dim]命令: /quit 退出 | /clear 清除对话 | /help 帮助[/dim]\n")
 
-    thread_id = str(uuid.uuid4())[:8]
-    config = {"configurable": {"thread_id": thread_id}}
-
     while True:
         try:
             user_input = Prompt.ask("\n[bold green]你[/bold green]")
@@ -78,8 +74,7 @@ async def run_chat(agent):
                 console.print("[yellow]再见！[/yellow]")
                 break
             elif cmd == "/clear":
-                thread_id = str(uuid.uuid4())[:8]
-                config = {"configurable": {"thread_id": thread_id}}
+                agent.clear()
                 console.print("[cyan]对话已清除，新会话已开始。[/cyan]")
                 continue
             elif cmd == "/help":
@@ -93,27 +88,16 @@ async def run_chat(agent):
                 console.print(f"[yellow]未知命令: {user_input}[/yellow]")
                 continue
 
-        # 流式调用 agent（v2 格式）
+        # 流式对话
         try:
             console.print()
-            async for chunk in agent.astream(
-                {"messages": [{"role": "user", "content": user_input}]},
-                config=config,
-                stream_mode="messages",
-                version="v2",
-            ):
-                if chunk["type"] == "messages":
-                    token, metadata = chunk["data"]
-                    if metadata.get("langgraph_node") != "model":
-                        continue
-                    # 只显示 text 类型的内容块
-                    if hasattr(token, "content_blocks"):
-                        for block in token.content_blocks:
-                            if block.get("type") == "text" and block.get("text"):
-                                console.print(block["text"], end="")
-                    elif hasattr(token, "content") and token.content:
-                        console.print(token.content, end="")
-
+            async for event_type, *data in agent.chat(user_input):
+                if event_type == "text":
+                    console.print(data[0], end="")
+                elif event_type == "tool_start":
+                    console.print(f"\n[dim]  ⚙ {data[0]}[/dim]", end="")
+                elif event_type == "tool_end":
+                    console.print(" [dim]✓[/dim]", end="")
             console.print("\n")
         except Exception as e:
             console.print(f"\n[red]错误: {e}[/red]")
