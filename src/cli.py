@@ -49,8 +49,7 @@ def build_agent(config: dict):
         base_url=config.get("base_url", "https://open.bigmodel.cn/api/paas/v4"),
         max_tokens=config.get("max_tokens", 4096),
         temperature=config.get("temperature", 0.7),
-        trigger_tokens=config.get("trigger_tokens", 4000),
-        keep_messages=config.get("keep_messages", 20),
+        compression=config.get("compression"),
     )
 
 

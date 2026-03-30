@@ -46,3 +46,42 @@ async def bash(command: str, timeout: int = 30) -> str:
     if len(result) > _MAX_OUTPUT:
         result = result[:_MAX_OUTPUT] + f"\n... (已截断，共 {len(result)} 字节)"
     return result
+
+
+@tool
+async def read(file_path: str, offset: int = 1, limit: int = 2000) -> str:
+    """读取文件内容并返回（带行号）。
+
+    Args:
+        file_path: 文件的绝对路径。
+        offset: 起始行号（从 1 开始，默认 1）。
+        limit: 最多返回的行数（默认 2000）。
+    """
+    try:
+        with open(file_path, "r") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        return f"错误：文件 {file_path} 不存在。"
+    except Exception as e:
+        return f"错误：{e}"
+
+    total_lines = len(lines)
+    start = max(1, offset) - 1
+    end = min(total_lines, start + limit)
+
+    if start >= total_lines:
+        return f"错误：起始行号 {offset} 超出文件总行数 {total_lines}。"
+
+    selected = lines[start:end]
+    result_lines = []
+    for i, line in enumerate(selected, start=start + 1):
+        result_lines.append(f"{i:>6}\t{line.rstrip()}")
+
+    result = "\n".join(result_lines)
+
+    if start > 0 or end < total_lines:
+        result += f"\n\n[显示第 {start + 1}-{end} 行，共 {total_lines} 行]"
+
+    if len(result) > _MAX_OUTPUT:
+        result = result[:_MAX_OUTPUT] + f"\n... (已截断，共 {len(result)} 字节)"
+    return result

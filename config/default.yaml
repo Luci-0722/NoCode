@@ -2,5 +2,13 @@ model: glm-4-flash
 base_url: "https://open.bigmodel.cn/api/paas/v4"
 max_tokens: 4096
 temperature: 0.7
-trigger_tokens: 4000
-keep_messages: 20
+
+# 压缩策略配置
+compression:
+  trigger_tokens: 8000     # 触发压缩的 token 估算阈值
+  keep_recent: 10          # 始终保留的最近消息数量
+  compressible_tools:      # 可被压缩删除的工具名称
+    - read
+    - bash
+    - glob
+    - grep
