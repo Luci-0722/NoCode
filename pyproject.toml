@@ -1,11 +1,12 @@
 [project]
-name = "best-friend"
+name = "codeagent"
 version = "0.2.0"
 description = "Your personal AI agent companion"
 requires-python = ">=3.12"
 dependencies = [
     "langchain>=0.3.0",
     "langchain-openai>=0.3.0",
+    "langgraph>=0.2.0",
     "rich>=13.9.0",
     "pyyaml>=6.0.2",
 ]
@@ -14,7 +15,7 @@ dependencies = [
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 
 [project.scripts]
-bf = "src.cli:main"
+codeagent = "src.cli:main"
 
 [build-system]
 requires = ["setuptools>=75.0"]

@@ -1,141 +1,154 @@
-"""Agent 构建：ChatOpenAI + Middleware 链 + read/bash 工具。"""
+"""Agent 构建：主代理 + 子代理 tool。"""
 
 from __future__ import annotations
 
-from langchain_core.messages import (
-    AIMessageChunk,
-    HumanMessage,
-    SystemMessage,
-    ToolMessage,
-)
+from uuid import uuid4
+
+from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import InMemorySaver
 
-from src.compression import CompressionMiddleware, CompressionStrategy, Middleware
-from src.tools import bash, read
-
-SYSTEM_PROMPT = """你是一个名叫**小智**的 AI 伙伴，性格开朗、聪明、乐于助人。
-
-你会记住用户告诉你的事情，并主动提供帮助。
-回答要简洁友好，像一个好朋友。"""
-
-MAX_TOOL_ROUNDS = 10
+from src.compression import CompressionMiddleware, CompressionStrategy
+from src.prompts import build_main_system_prompt, build_subagent_system_prompt
+from src.tools import build_core_tools, make_subagent_tool
 
 
-class BFAgent:
-    """Best Friend Agent：支持中间件链和工具调用。"""
+class CodeAgent:
+    """CodeAgent：主代理负责协调工具和子代理。"""
 
-    def __init__(
-        self,
-        llm,
-        tools: list,
-        middlewares: list[Middleware] | None = None,
-        system_prompt: str = "",
-    ):
-        self._llm = llm
-        self._tool_map = {t.name: t for t in tools}
-        self._middlewares = middlewares or []
-        self._system_prompt = system_prompt
-        self._messages: list = []
+    def __init__(self, agent, thread_id: str | None = None):
+        self._agent = agent
+        self._thread_id = thread_id or self._new_thread_id()
+
+    @staticmethod
+    def _new_thread_id() -> str:
+        return f"codeagent-{uuid4().hex}"
 
     def clear(self):
-        self._messages.clear()
-
-    def _build_messages(self) -> list:
-        return [SystemMessage(content=self._system_prompt)] + list(self._messages)
-
-    def _apply_middlewares(self, messages: list) -> list:
-        for mw in self._middlewares:
-            messages = mw.process(messages)
-        return messages
-
-    async def _invoke_tool(self, tool_call: dict) -> str:
-        tool = self._tool_map.get(tool_call["name"])
-        if not tool:
-            return f"错误：未知工具 {tool_call['name']}"
-        result = await tool.ainvoke(tool_call["args"])
-        return str(result)
+        self._thread_id = self._new_thread_id()
 
     async def chat(self, user_input: str):
-        """异步生成器，yield (event_type, *data) 事件。
+        """异步生成器，yield (event_type, *data)。"""
+        config = {"configurable": {"thread_id": self._thread_id}}
 
-        事件类型：
-          - ("text", str)           模型输出的文本片段
-          - ("tool_start", str)     开始调用工具（工具名）
-          - ("tool_end", str)       工具调用完成
-        """
-        self._messages.append(HumanMessage(content=user_input))
+        async for chunk in self._agent.astream(
+            {"messages": [{"role": "user", "content": user_input}]},
+            config=config,
+            stream_mode=["messages", "updates"],
+            version="v2",
+        ):
+            chunk_type = chunk.get("type")
 
-        for _ in range(MAX_TOOL_ROUNDS):
-            full = self._apply_middlewares(self._build_messages())
+            if chunk_type == "messages":
+                token, metadata = chunk["data"]
+                if metadata.get("langgraph_node") != "model":
+                    continue
+                if isinstance(token, AIMessageChunk) and token.text:
+                    yield ("text", token.text)
+                continue
 
-            # 流式接收模型输出
-            accumulated = AIMessageChunk(content="")
-            async for chunk in self._llm.astream(full):
-                accumulated = accumulated + chunk
-                if chunk.content:
-                    yield ("text", chunk.content)
+            if chunk_type != "updates":
+                continue
 
-            self._messages.append(accumulated)
+            for step, data in chunk["data"].items():
+                if not isinstance(data, dict):
+                    continue
+                new_messages = data.get("messages", [])
+                if not isinstance(new_messages, list):
+                    continue
 
-            # 无工具调用 → 对话结束
-            if not accumulated.tool_calls:
-                return
-
-            # 执行所有工具调用
-            for tc in accumulated.tool_calls:
-                yield ("tool_start", tc["name"])
-                result = await self._invoke_tool(tc)
-                self._messages.append(
-                    ToolMessage(
-                        content=result,
-                        tool_call_id=tc["id"],
-                        name=tc["name"],
-                    )
-                )
-                yield ("tool_end", tc["name"])
+                if step == "model":
+                    for message in new_messages:
+                        if isinstance(message, AIMessage):
+                            for tool_call in message.tool_calls:
+                                yield ("tool_start", tool_call["name"])
+                elif step == "tools":
+                    for message in new_messages:
+                        if isinstance(message, ToolMessage):
+                            yield ("tool_end", message.name or "tool")
 
 
-def create_bf_agent(
+def _build_middleware(compression: dict | None):
+    if not compression:
+        return []
+
+    strategy = CompressionStrategy(
+        trigger_tokens=compression.get("trigger_tokens", 8000),
+        keep_recent=compression.get("keep_recent", 10),
+        compressible_tools=tuple(
+            compression.get(
+                "compressible_tools",
+                ("read", "write", "edit", "glob", "grep", "bash", "delegate_code"),
+            )
+        ),
+    )
+    return [CompressionMiddleware(strategy).as_langchain_middleware()]
+
+
+def _build_model(
+    api_key: str,
+    model: str,
+    base_url: str,
+    temperature: float,
+    max_tokens: int,
+) -> ChatOpenAI:
+    return ChatOpenAI(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+
+def create_codeagent(
     api_key: str,
     model: str = "glm-4-flash",
     base_url: str = "https://open.bigmodel.cn/api/paas/v4",
     max_tokens: int = 4096,
     temperature: float = 0.7,
     compression: dict | None = None,
-) -> BFAgent:
-    """创建 Best Friend Agent 实例。
+    subagent_model: str | None = None,
+    subagent_temperature: float = 0.1,
+) -> CodeAgent:
+    """创建主代理和代码子代理。"""
+    middleware = _build_middleware(compression)
 
-    Args:
-        api_key: 智谱 AI API Key。
-        model: 模型名称。
-        base_url: API 基础 URL。
-        max_tokens: 最大生成 token 数。
-        temperature: 温度参数。
-        compression: 压缩策略配置字典，包含：
-            - trigger_tokens: 触发阈值
-            - keep_recent: 保留最近消息数
-            - compressible_tools: 可压缩工具名列表
-    """
-    llm = ChatOpenAI(
-        model=model,
+    main_llm = _build_model(
         api_key=api_key,
+        model=model,
         base_url=base_url,
         temperature=temperature,
         max_tokens=max_tokens,
-    ).bind_tools([read, bash])
-
-    middlewares: list[Middleware] = []
-    if compression:
-        strategy = CompressionStrategy(
-            trigger_tokens=compression.get("trigger_tokens", 8000),
-            keep_recent=compression.get("keep_recent", 10),
-            compressible_tools=tuple(compression.get("compressible_tools", ("read", "bash", "glob", "grep"))),
-        )
-        middlewares.append(CompressionMiddleware(strategy))
-
-    return BFAgent(
-        llm=llm,
-        tools=[read, bash],
-        middlewares=middlewares,
-        system_prompt=SYSTEM_PROMPT,
     )
+    subagent_llm = _build_model(
+        api_key=api_key,
+        model=subagent_model or model,
+        base_url=base_url,
+        temperature=subagent_temperature,
+        max_tokens=max_tokens,
+    )
+
+    core_tools = build_core_tools()
+
+    subagent = create_agent(
+        model=subagent_llm,
+        tools=core_tools,
+        system_prompt=build_subagent_system_prompt(),
+        checkpointer=InMemorySaver(),
+        middleware=middleware,
+        name="code_subagent",
+    )
+
+    tools = [*core_tools, make_subagent_tool(subagent)]
+    agent = create_agent(
+        model=main_llm,
+        tools=tools,
+        system_prompt=build_main_system_prompt(),
+        checkpointer=InMemorySaver(),
+        middleware=middleware,
+        name="codeagent_supervisor",
+    )
+
+    return CodeAgent(agent=agent)

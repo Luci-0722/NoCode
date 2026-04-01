@@ -12,15 +12,15 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 
-from src.agent import create_bf_agent
+from src.agent import create_codeagent
 
 console = Console()
 
 BANNER = """
 [bold cyan]
 ╔══════════════════════════════════╗
-║        Best Friend AI           ║
-║       你的 AI 伙伴 · 小智       ║
+║          codeagent             ║
+║       你的中文代码代理          ║
 ╚══════════════════════════════════╝
 [/bold cyan]
 """
@@ -42,13 +42,15 @@ def build_agent(config: dict):
         console.print("[red]错误：未设置 API Key。请设置 ZHIPU_API_KEY 环境变量。[/red]")
         sys.exit(1)
 
-    return create_bf_agent(
+    return create_codeagent(
         api_key=api_key,
         model=config.get("model", "glm-4-flash"),
         base_url=config.get("base_url", "https://open.bigmodel.cn/api/paas/v4"),
         max_tokens=config.get("max_tokens", 4096),
         temperature=config.get("temperature", 0.7),
         compression=config.get("compression"),
+        subagent_model=config.get("subagent_model"),
+        subagent_temperature=config.get("subagent_temperature", 0.1),
     )
 
 

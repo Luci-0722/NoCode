@@ -7,13 +7,19 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
+from langchain.agents import AgentState
+from langchain.agents.middleware import before_model
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
+    RemoveMessage,
     SystemMessage,
     ToolMessage,
 )
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langgraph.runtime import Runtime
 
 
 # ── Middleware 接口 ──────────────────────────────────────────────
@@ -137,3 +143,25 @@ class CompressionMiddleware(Middleware):
 
     def process(self, messages: list[BaseMessage]) -> list[BaseMessage]:
         return self._compressor.compress(messages)
+
+    def as_langchain_middleware(self):
+        compressor = self._compressor
+
+        @before_model
+        def _compress_before_model(
+            state: AgentState,
+            runtime: Runtime,
+        ) -> dict[str, Any] | None:
+            del runtime
+            messages = state["messages"]
+            compressed = compressor.compress(messages)
+            if compressed == messages:
+                return None
+            return {
+                "messages": [
+                    RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                    *compressed,
+                ]
+            }
+
+        return _compress_before_model
