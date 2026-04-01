@@ -1,29 +1,125 @@
-"""CLI 入口：Rich REPL + 流式输出。"""
+"""CLI 入口：更接近 Claude Code 风格的 Rich 终端交互。"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+from pathlib import Path
 import sys
 
 import yaml
-from rich.console import Console
+from rich import box
+from rich.console import Console, Group
+from rich.live import Live
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
+from rich.table import Table
+from rich.text import Text
 
 from src.agent import create_codeagent
 
 console = Console()
 
-BANNER = """
-[bold cyan]
-╔══════════════════════════════════╗
-║          codeagent             ║
-║       你的中文代码代理          ║
-╚══════════════════════════════════╝
-[/bold cyan]
-"""
+ACCENT = "#5FD7AF"
+SECONDARY = "#8A99A6"
+WARNING = "#F4D35E"
+DANGER = "#FF6B6B"
+USER_COLOR = "#7ED957"
+
+
+def _shorten_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)
+
+
+def _render_banner(agent) -> Panel:
+    grid = Table.grid(expand=True)
+    grid.add_column(ratio=2)
+    grid.add_column(justify="right")
+    grid.add_row(
+        Text("codeagent", style=f"bold {ACCENT}"),
+        Text("interactive coding shell", style=SECONDARY),
+    )
+    grid.add_row(
+        Text("参考 Claude Code / OpenCode / OpenClaw 的终端节奏", style="white"),
+        Text(f"session {agent.thread_id.split('-')[-1][:8]}", style=SECONDARY),
+    )
+    return Panel(
+        grid,
+        border_style=ACCENT,
+        box=box.ROUNDED,
+        padding=(0, 1),
+    )
+
+
+def _render_status(agent) -> Table:
+    cwd = _shorten_path(Path.cwd())
+    table = Table(box=box.SIMPLE_HEAD, expand=True, show_header=False, padding=(0, 1))
+    table.add_column(style=SECONDARY, width=10)
+    table.add_column()
+    table.add_column(style=SECONDARY, width=10)
+    table.add_column()
+    table.add_row("cwd", cwd, "model", agent.model_name or "-")
+    table.add_row("subagent", agent.subagent_model_name or "-", "thread", agent.thread_id)
+    return table
+
+
+def _render_help() -> Panel:
+    help_table = Table.grid(padding=(0, 2))
+    help_table.add_column(style=ACCENT, justify="right")
+    help_table.add_column()
+    help_table.add_row("/help", "显示帮助")
+    help_table.add_row("/clear", "重置会话线程")
+    help_table.add_row("/session", "查看当前会话状态")
+    help_table.add_row("/quit", "退出程序")
+    return Panel(help_table, title="命令", border_style=ACCENT, box=box.ROUNDED)
+
+
+def _render_user_message(content: str) -> Panel:
+    return Panel(
+        Text(content, style="white"),
+        title=f"[bold {USER_COLOR}]你[/bold {USER_COLOR}]",
+        border_style=USER_COLOR,
+        box=box.ROUNDED,
+        padding=(0, 1),
+    )
+
+
+def _render_assistant_message(content: str, active_tools: list[str], finished_tools: list[str]):
+    body = content.strip()
+    body_renderable = Markdown(body) if body else Text("正在思考...", style=SECONDARY)
+    sections: list[object] = [
+        Panel(
+            body_renderable,
+            title=f"[bold {ACCENT}]助手[/bold {ACCENT}]",
+            border_style=ACCENT,
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    ]
+
+    if active_tools or finished_tools:
+        tool_table = Table.grid(expand=True)
+        tool_table.add_column()
+        for tool_name in active_tools[-4:]:
+            tool_table.add_row(f"[{WARNING}]●[/{WARNING}] 运行中: [bold]{tool_name}[/bold]")
+        for tool_name in finished_tools[-4:]:
+            tool_table.add_row(f"[{ACCENT}]✓[/{ACCENT}] 已完成: [bold]{tool_name}[/bold]")
+        sections.append(
+            Panel(
+                tool_table,
+                title="工具活动",
+                border_style=SECONDARY,
+                box=box.ROUNDED,
+                padding=(0, 1),
+            )
+        )
+
+    return sections
 
 
 def load_config() -> dict:
@@ -55,12 +151,13 @@ def build_agent(config: dict):
 
 
 async def run_chat(agent):
-    console.print(BANNER)
-    console.print("[dim]命令: /quit 退出 | /clear 清除对话 | /help 帮助[/dim]\n")
+    console.print(_render_banner(agent))
+    console.print(_render_status(agent))
+    console.print(f"[{SECONDARY}]命令: /help /clear /session /quit[/]\n")
 
     while True:
         try:
-            user_input = Prompt.ask("\n[bold green]你[/bold green]")
+            user_input = Prompt.ask(f"\n[bold {USER_COLOR}]you[/bold {USER_COLOR}]")
         except (EOFError, KeyboardInterrupt):
             console.print("\n[yellow]再见！[/yellow]")
             break
@@ -75,34 +172,57 @@ async def run_chat(agent):
             if cmd in ("/quit", "/exit"):
                 console.print("[yellow]再见！[/yellow]")
                 break
-            elif cmd == "/clear":
+            if cmd == "/clear":
                 agent.clear()
-                console.print("[cyan]对话已清除，新会话已开始。[/cyan]")
+                console.print(Panel("已创建新会话线程。", border_style=ACCENT, box=box.ROUNDED))
+                console.print(_render_status(agent))
                 continue
-            elif cmd == "/help":
-                console.print(Panel(
-                    "  /quit  - 退出程序\n  /clear - 清除对话，开始新会话\n  /help  - 显示帮助",
-                    title="命令列表",
-                    border_style="cyan",
-                ))
+            if cmd == "/help":
+                console.print(_render_help())
                 continue
-            else:
-                console.print(f"[yellow]未知命令: {user_input}[/yellow]")
+            if cmd == "/session":
+                console.print(_render_status(agent))
                 continue
+            console.print(f"[{WARNING}]未知命令:[/] {user_input}")
+            continue
 
         # 流式对话
         try:
             console.print()
-            async for event_type, *data in agent.chat(user_input):
-                if event_type == "text":
-                    console.print(data[0], end="")
-                elif event_type == "tool_start":
-                    console.print(f"\n[dim]  ⚙ {data[0]}[/dim]", end="")
-                elif event_type == "tool_end":
-                    console.print(" [dim]✓[/dim]", end="")
-            console.print("\n")
+            console.print(_render_user_message(user_input))
+
+            buffer = ""
+            active_tools: list[str] = []
+            finished_tools: list[str] = []
+
+            with Live(console=console, refresh_per_second=12, transient=True) as live:
+                def redraw():
+                    live.update(
+                        Group(*_render_assistant_message(buffer, active_tools, finished_tools)),
+                        refresh=True,
+                    )
+
+                redraw()
+
+                async for event_type, *data in agent.chat(user_input):
+                    if event_type == "text":
+                        buffer += data[0]
+                        redraw()
+                    elif event_type == "tool_start":
+                        tool_name = data[0]
+                        active_tools.append(tool_name)
+                        redraw()
+                    elif event_type == "tool_end":
+                        tool_name = data[0]
+                        if tool_name in active_tools:
+                            active_tools.remove(tool_name)
+                        finished_tools.append(tool_name)
+                        redraw()
+
+            console.print(*_render_assistant_message(buffer, active_tools, finished_tools))
+            console.print()
         except Exception as e:
-            console.print(f"\n[red]错误: {e}[/red]")
+            console.print(f"\n[{DANGER}]错误:[/] {e}")
             logging.exception("Chat error")
 
 

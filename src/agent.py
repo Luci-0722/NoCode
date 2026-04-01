@@ -17,13 +17,33 @@ from src.tools import build_core_tools, make_subagent_tool
 class CodeAgent:
     """CodeAgent：主代理负责协调工具和子代理。"""
 
-    def __init__(self, agent, thread_id: str | None = None):
+    def __init__(
+        self,
+        agent,
+        thread_id: str | None = None,
+        model_name: str = "",
+        subagent_model_name: str = "",
+    ):
         self._agent = agent
         self._thread_id = thread_id or self._new_thread_id()
+        self._model_name = model_name
+        self._subagent_model_name = subagent_model_name
 
     @staticmethod
     def _new_thread_id() -> str:
         return f"codeagent-{uuid4().hex}"
+
+    @property
+    def thread_id(self) -> str:
+        return self._thread_id
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def subagent_model_name(self) -> str:
+        return self._subagent_model_name
 
     def clear(self):
         self._thread_id = self._new_thread_id()
@@ -151,4 +171,8 @@ def create_codeagent(
         name="codeagent_supervisor",
     )
 
-    return CodeAgent(agent=agent)
+    return CodeAgent(
+        agent=agent,
+        model_name=model,
+        subagent_model_name=subagent_model or model,
+    )
