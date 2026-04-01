@@ -89,37 +89,54 @@ def _render_user_message(content: str) -> Panel:
     )
 
 
-def _render_assistant_message(content: str, active_tools: list[str], finished_tools: list[str]):
+def _build_live_renderable(content: str, active_tools: list[str], finished_tools: list[str]):
+    """构建 Live 内部的轻量渲染（不用 Panel，避免重复叠加）。"""
+    parts: list[object] = []
+
     body = content.strip()
-    body_renderable = Markdown(body) if body else Text("正在思考...", style=SECONDARY)
-    sections: list[object] = [
-        Panel(
-            body_renderable,
-            title=f"[bold {ACCENT}]助手[/bold {ACCENT}]",
-            border_style=ACCENT,
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
-    ]
+    if body:
+        parts.append(Markdown(body))
+    else:
+        parts.append(Text("正在思考...", style=SECONDARY))
 
     if active_tools or finished_tools:
+        tool_lines: list[object] = []
+        for tool_name in active_tools[-4:]:
+            tool_lines.append(Text(f"  ● 运行中: {tool_name}", style=WARNING))
+        for tool_name in finished_tools[-4:]:
+            tool_lines.append(Text(f"  ✓ 已完成: {tool_name}", style=ACCENT))
+        parts.append(Text(""))  # 空行分隔
+        parts.extend(tool_lines)
+
+    return Group(*parts)
+
+
+def _render_assistant_final(content: str, finished_tools: list[str]):
+    """流式结束后，打印最终带 Panel 的结果。"""
+    body = content.strip()
+    if not body:
+        return
+
+    console.print(Panel(
+        Markdown(body),
+        title=f"[bold {ACCENT}]助手[/bold {ACCENT}]",
+        border_style=ACCENT,
+        box=box.ROUNDED,
+        padding=(0, 1),
+    ))
+
+    if finished_tools:
         tool_table = Table.grid(expand=True)
         tool_table.add_column()
-        for tool_name in active_tools[-4:]:
-            tool_table.add_row(f"[{WARNING}]●[/{WARNING}] 运行中: [bold]{tool_name}[/bold]")
-        for tool_name in finished_tools[-4:]:
-            tool_table.add_row(f"[{ACCENT}]✓[/{ACCENT}] 已完成: [bold]{tool_name}[/bold]")
-        sections.append(
-            Panel(
-                tool_table,
-                title="工具活动",
-                border_style=SECONDARY,
-                box=box.ROUNDED,
-                padding=(0, 1),
-            )
-        )
-
-    return sections
+        for tool_name in finished_tools[-8:]:
+            tool_table.add_row(f"[{ACCENT}]✓[/{ACCENT}] [bold]{tool_name}[/bold]")
+        console.print(Panel(
+            tool_table,
+            title="工具活动",
+            border_style=SECONDARY,
+            box=box.ROUNDED,
+            padding=(0, 1),
+        ))
 
 
 def load_config() -> dict:
@@ -195,29 +212,39 @@ async def run_chat(agent):
             active_tools: list[str] = []
             finished_tools: list[str] = []
 
-            with Live(console=console, refresh_per_second=10) as live:
-                def redraw():
-                    live.update(
-                        Group(*_render_assistant_message(buffer, active_tools, finished_tools)),
-                        refresh=True,
-                    )
-
-                redraw()
-
+            # 流式阶段：用 transient Live 显示纯文本，避免 Panel 叠加
+            with Live(
+                Text("正在思考...", style=SECONDARY),
+                console=console,
+                refresh_per_second=8,
+                transient=True,
+            ) as live:
                 async for event_type, *data in agent.chat(user_input):
                     if event_type == "text":
                         buffer += data[0]
-                        redraw()
+                        live.update(
+                            _build_live_renderable(buffer, active_tools, finished_tools),
+                            refresh=True,
+                        )
                     elif event_type == "tool_start":
-                        tool_name = data[0]
-                        active_tools.append(tool_name)
-                        redraw()
+                        active_tools.append(data[0])
+                        live.update(
+                            _build_live_renderable(buffer, active_tools, finished_tools),
+                            refresh=True,
+                        )
                     elif event_type == "tool_end":
                         tool_name = data[0]
                         if tool_name in active_tools:
                             active_tools.remove(tool_name)
                         finished_tools.append(tool_name)
-                        redraw()
+                        live.update(
+                            _build_live_renderable(buffer, active_tools, finished_tools),
+                            refresh=True,
+                        )
+
+            # 结束后：打印最终带 Panel 的结果（只打印一次）
+            _render_assistant_final(buffer, finished_tools)
+            console.print()
         except Exception as e:
             console.print(f"\n[{DANGER}]错误:[/] {e}")
             logging.exception("Chat error")
