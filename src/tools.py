@@ -285,7 +285,7 @@ def web_search(query: str, max_results: int = 5) -> str:
     pattern = re.compile(
         r'(?s)<a[^>]*class="result__a"[^>]*href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>.*?'
         r'<a[^>]*class="result__snippet"[^>]*>(?P<snippet>.*?)</a>|'
-        r'(?s)<a[^>]*class="result__a"[^>]*href="(?P<href2>[^"]+)"[^>]*>(?P<title2>.*?)</a>.*?'
+        r'<a[^>]*class="result__a"[^>]*href="(?P<href2>[^"]+)"[^>]*>(?P<title2>.*?)</a>.*?'
         r'<div[^>]*class="result__snippet"[^>]*>(?P<snippet2>.*?)</div>'
     )
 
