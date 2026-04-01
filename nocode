@@ -12,7 +12,7 @@ else
 fi
 
 if [[ $# -eq 0 || "${1:-}" == "chat" ]]; then
-  exec node --experimental-strip-types "$SCRIPT_DIR/tui.ts"
+  exec node --experimental-strip-types "$SCRIPT_DIR/frontend/tui.ts"
 fi
 
 exec "$PYTHON_BIN" -m src.main "$@"
