@@ -1,7 +1,7 @@
 [project]
-name = "codeagent"
+name = "nocode"
 version = "0.2.0"
-description = "Your personal AI agent companion"
+description = "NoCode AI agent companion"
 requires-python = ">=3.12"
 dependencies = [
     "langchain>=0.3.0",
@@ -15,7 +15,10 @@ dependencies = [
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 
 [project.scripts]
-codeagent = "src.cli:main"
+nocode = "src.main:main"
+
+[tool.setuptools]
+packages = ["src"]
 
 [build-system]
 requires = ["setuptools>=75.0"]

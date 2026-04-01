@@ -256,7 +256,7 @@ def _http_get(url: str) -> str:
     request = Request(
         url,
         headers={
-            "User-Agent": "codeagent/0.1 (+https://local.workspace)",
+            "User-Agent": "nocode/0.1 (+https://local.workspace)",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         },
     )
@@ -367,17 +367,27 @@ def make_subagent_tool(subagent, name: str = "delegate_code"):
     class DelegateInput(BaseModel):
         task: str = Field(description="要委派给子代理的具体任务。")
         context: str = Field(default="", description="补充上下文，可选。")
+        thread_id: str = Field(
+            default="",
+            description="可选的子代理会话名；传入相同值会复用同一个子代理线程。",
+        )
 
     @tool(name, args_schema=DelegateInput)
-    async def delegate_code(task: str, context: str = "") -> str:
+    async def delegate_code(task: str, context: str = "", thread_id: str = "") -> str:
         """把复杂编码任务委派给后台子代理执行。"""
         prompt = task.strip()
         if context.strip():
             prompt = f"任务：{task.strip()}\n\n补充上下文：\n{context.strip()}"
 
+        resolved_thread_id = (
+            f"subagent-named-{thread_id.strip()}"
+            if thread_id.strip()
+            else f"subagent-{uuid4().hex}"
+        )
+
         result = await subagent.ainvoke(
             {"messages": [{"role": "user", "content": prompt}]},
-            config={"configurable": {"thread_id": f"subagent-{uuid4().hex}"}},
+            config={"configurable": {"thread_id": resolved_thread_id}},
         )
         messages = result.get("messages", [])
         summary = _extract_last_ai_text(messages)

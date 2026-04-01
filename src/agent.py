@@ -11,11 +11,12 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from src.compression import CompressionMiddleware, CompressionStrategy
 from src.prompts import build_main_system_prompt, build_subagent_system_prompt
+from src.skill_tools import load_skill, search_skills
 from src.tools import build_core_tools, make_subagent_tool
 
 
-class CodeAgent:
-    """CodeAgent：主代理负责协调工具和子代理。"""
+class MainAgent:
+    """主代理负责协调工具和子代理。"""
 
     def __init__(
         self,
@@ -31,7 +32,7 @@ class CodeAgent:
 
     @staticmethod
     def _new_thread_id() -> str:
-        return f"codeagent-{uuid4().hex}"
+        return f"mainagent-{uuid4().hex}"
 
     @property
     def thread_id(self) -> str:
@@ -122,7 +123,7 @@ def _build_model(
     )
 
 
-def create_codeagent(
+def create_mainagent(
     api_key: str,
     model: str = "glm-4-flash",
     base_url: str = "https://open.bigmodel.cn/api/paas/v4",
@@ -131,7 +132,7 @@ def create_codeagent(
     compression: dict | None = None,
     subagent_model: str | None = None,
     subagent_temperature: float = 0.1,
-) -> CodeAgent:
+) -> MainAgent:
     """创建主代理和代码子代理。"""
     middleware = _build_middleware(compression)
 
@@ -151,27 +152,30 @@ def create_codeagent(
     )
 
     core_tools = build_core_tools()
-
+    
+    # 添加技能系统工具
+    skill_tools = [load_skill, search_skills]
+    
     subagent = create_agent(
         model=subagent_llm,
         tools=core_tools,
         system_prompt=build_subagent_system_prompt(),
         checkpointer=InMemorySaver(),
         middleware=middleware,
-        name="code_subagent",
+        name="mainagent_subagent",
     )
 
-    tools = [*core_tools, make_subagent_tool(subagent)]
+    tools = [*core_tools, *skill_tools, make_subagent_tool(subagent)]
     agent = create_agent(
         model=main_llm,
         tools=tools,
         system_prompt=build_main_system_prompt(),
         checkpointer=InMemorySaver(),
         middleware=middleware,
-        name="codeagent_supervisor",
+        name="mainagent_supervisor",
     )
 
-    return CodeAgent(
+    return MainAgent(
         agent=agent,
         model_name=model,
         subagent_model_name=subagent_model or model,
