@@ -82,7 +82,7 @@ class CodeAgent:
                     for message in new_messages:
                         if isinstance(message, AIMessage):
                             for tool_call in message.tool_calls:
-                                yield ("tool_start", tool_call["name"])
+                                yield ("tool_start", tool_call["name"], tool_call.get("args", {}))
                 elif step == "tools":
                     for message in new_messages:
                         if isinstance(message, ToolMessage):

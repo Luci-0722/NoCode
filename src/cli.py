@@ -89,7 +89,20 @@ def _render_user_message(content: str) -> Panel:
     )
 
 
-def _build_live_renderable(content: str, active_tools: list[str], finished_tools: list[str]):
+def _format_tool_args(args: dict, max_len: int = 60) -> str:
+    """将工具参数格式化为简短的一行摘要。"""
+    if not args:
+        return ""
+    parts: list[str] = []
+    for k, v in args.items():
+        s = str(v)
+        if len(s) > max_len:
+            s = s[:max_len] + "..."
+        parts.append(f"{k}={s}")
+    return ", ".join(parts)
+
+
+def _build_live_renderable(content: str, active_tools: list[dict], finished_tools: list[dict]):
     """构建 Live 内部的轻量渲染（不用 Panel，避免重复叠加）。"""
     parts: list[object] = []
 
@@ -101,17 +114,25 @@ def _build_live_renderable(content: str, active_tools: list[str], finished_tools
 
     if active_tools or finished_tools:
         tool_lines: list[object] = []
-        for tool_name in active_tools[-4:]:
-            tool_lines.append(Text(f"  ● 运行中: {tool_name}", style=WARNING))
-        for tool_name in finished_tools[-4:]:
-            tool_lines.append(Text(f"  ✓ 已完成: {tool_name}", style=ACCENT))
+        for t in active_tools[-4:]:
+            args_str = _format_tool_args(t.get("args", {}))
+            line = f"  ● {t['name']}"
+            if args_str:
+                line += f"({args_str})"
+            tool_lines.append(Text(line, style=WARNING))
+        for t in finished_tools[-4:]:
+            args_str = _format_tool_args(t.get("args", {}))
+            line = f"  ✓ {t['name']}"
+            if args_str:
+                line += f"({args_str})"
+            tool_lines.append(Text(line, style=ACCENT))
         parts.append(Text(""))  # 空行分隔
         parts.extend(tool_lines)
 
     return Group(*parts)
 
 
-def _render_assistant_final(content: str, finished_tools: list[str]):
+def _render_assistant_final(content: str, finished_tools: list[dict]):
     """流式结束后，打印最终带 Panel 的结果。"""
     body = content.strip()
     if not body:
@@ -128,8 +149,12 @@ def _render_assistant_final(content: str, finished_tools: list[str]):
     if finished_tools:
         tool_table = Table.grid(expand=True)
         tool_table.add_column()
-        for tool_name in finished_tools[-8:]:
-            tool_table.add_row(f"[{ACCENT}]✓[/{ACCENT}] [bold]{tool_name}[/bold]")
+        for t in finished_tools[-8:]:
+            args_str = _format_tool_args(t.get("args", {}))
+            line = f"[{ACCENT}]✓[/{ACCENT}] [bold]{t['name']}[/bold]"
+            if args_str:
+                line += f"  [{SECONDARY}]{args_str}[/]"
+            tool_table.add_row(line)
         console.print(Panel(
             tool_table,
             title="工具活动",
@@ -209,8 +234,8 @@ async def run_chat(agent):
             console.print(_render_user_message(user_input))
 
             buffer = ""
-            active_tools: list[str] = []
-            finished_tools: list[str] = []
+            active_tools: list[dict] = []
+            finished_tools: list[dict] = []
 
             # 流式阶段：用 transient Live 显示纯文本，避免 Panel 叠加
             with Live(
@@ -227,16 +252,23 @@ async def run_chat(agent):
                             refresh=True,
                         )
                     elif event_type == "tool_start":
-                        active_tools.append(data[0])
+                        tool_name = data[0]
+                        tool_args = data[1] if len(data) > 1 else {}
+                        active_tools.append({"name": tool_name, "args": tool_args})
                         live.update(
                             _build_live_renderable(buffer, active_tools, finished_tools),
                             refresh=True,
                         )
                     elif event_type == "tool_end":
                         tool_name = data[0]
-                        if tool_name in active_tools:
-                            active_tools.remove(tool_name)
-                        finished_tools.append(tool_name)
+                        # 找到对应的 active 工具，保留参数信息
+                        matched = next(
+                            (t for t in active_tools if t["name"] == tool_name),
+                            {"name": tool_name, "args": {}},
+                        )
+                        if matched in active_tools:
+                            active_tools.remove(matched)
+                        finished_tools.append(matched)
                         live.update(
                             _build_live_renderable(buffer, active_tools, finished_tools),
                             refresh=True,
