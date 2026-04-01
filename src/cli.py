@@ -195,7 +195,7 @@ async def run_chat(agent):
             active_tools: list[str] = []
             finished_tools: list[str] = []
 
-            with Live(console=console, refresh_per_second=12, transient=True) as live:
+            with Live(console=console, refresh_per_second=10) as live:
                 def redraw():
                     live.update(
                         Group(*_render_assistant_message(buffer, active_tools, finished_tools)),
@@ -218,9 +218,6 @@ async def run_chat(agent):
                             active_tools.remove(tool_name)
                         finished_tools.append(tool_name)
                         redraw()
-
-            console.print(*_render_assistant_message(buffer, active_tools, finished_tools))
-            console.print()
         except Exception as e:
             console.print(f"\n[{DANGER}]错误:[/] {e}")
             logging.exception("Chat error")

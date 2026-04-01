@@ -111,9 +111,6 @@ def build_main_system_prompt(cwd: Path | None = None) -> str:
         f" - Working directory: {cwd}\n"
         f" - Date: {today}\n"
         f" - Platform: {platform.system()} {platform.release()}",
-        "# Prompt study notes\n"
-        "主提示词的核心思想是：先约束代理行为边界，再注入项目级说明文件，最后附加环境与配置上下文。"
-        "这和 Claude Code 的结构一致，但这里全部改写为中文、并针对当前项目做了收敛。",
     ]
 
     if files:
@@ -133,9 +130,6 @@ def build_subagent_system_prompt(role: str = "代码执行子代理") -> str:
             " - 只处理被委派的任务。\n"
             " - 只使用你当前可用的工具。\n"
             " - 如果缺少上下文，基于已有文件与输入自行推断，不要把问题抛回给用户。\n"
-            " - 优先返回事实、结果、风险和下一步，不要写空话。",
-            "# Prompt study notes\n"
-            "子代理提示词比主代理更短，重点不是人格，而是边界：只做委派任务、只用给定工具、结果简洁。"
-            "这正是 Claude Code 子代理 prompt 的核心模式。",
+            " - 优先返回事实、结果、风险和下一步，不要写空话。"
         ]
     )
