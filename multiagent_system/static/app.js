@@ -119,49 +119,12 @@ function isNearBottom(element, threshold = 64) {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
 }
 
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function escapeAttribute(value) {
-  return escapeHtml(value).replaceAll("`", "&#96;");
-}
-
-function sanitizeUrl(raw) {
-  const value = String(raw ?? "").trim();
-  if (!value) {
-    return "";
-  }
-  try {
-    const url = new URL(value, window.location.origin);
-    if (url.protocol === "http:" || url.protocol === "https:" || url.protocol === "mailto:") {
-      return url.href;
-    }
-  } catch {
-    return "";
-  }
-  return "";
-}
-
-function renderInlineMarkdown(text) {
-  let html = escapeHtml(text);
-  html = html.replace(/`([^`\n]+)`/g, (_match, code) => `<code>${code}</code>`);
-  html = html.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_match, label, href) => {
-    const safeHref = sanitizeUrl(href);
-    if (!safeHref) {
-      return `[${escapeHtml(label)}]`;
-    }
-    return `<a href="${escapeAttribute(safeHref)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`;
-  });
-  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/(^|[^\*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
-  return html;
-}
+const markdownRenderer = window.markdownit({
+  html: false,
+  breaks: true,
+  linkify: true,
+  typographer: false,
+});
 
 function normalizeMarkdown(text) {
   let source = String(text ?? "").replace(/\r\n/g, "\n").trim();
@@ -194,122 +157,28 @@ function normalizeMarkdown(text) {
     .trim();
 }
 
+function renderMarkdownFallback(text) {
+  const escaped = String(text ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+  return `<p>${escaped.replaceAll("\n", "<br>")}</p>`;
+}
+
 function renderMarkdown(text) {
   const source = normalizeMarkdown(text);
   if (!source.trim()) {
     return "<p>(无内容)</p>";
   }
-
-  const lines = source.split("\n");
-  const blocks = [];
-  let paragraph = [];
-  let listItems = [];
-  let quoteLines = [];
-  let inFence = false;
-  let fenceLines = [];
-  let fenceLanguage = "";
-
-  function flushParagraph() {
-    if (paragraph.length === 0) {
-      return;
-    }
-    const content = paragraph.map((line) => renderInlineMarkdown(line)).join("<br>");
-    blocks.push(`<p>${content}</p>`);
-    paragraph = [];
+  try {
+    const rendered = markdownRenderer.render(source);
+    return window.DOMPurify.sanitize(rendered, {
+      USE_PROFILES: { html: true },
+    });
+  } catch (error) {
+    console.error("markdown render failed", error);
+    return renderMarkdownFallback(source);
   }
-
-  function flushList() {
-    if (listItems.length === 0) {
-      return;
-    }
-    blocks.push(`<ul>${listItems.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</ul>`);
-    listItems = [];
-  }
-
-  function flushQuote() {
-    if (quoteLines.length === 0) {
-      return;
-    }
-    const content = quoteLines.map((line) => renderInlineMarkdown(line)).join("<br>");
-    blocks.push(`<blockquote><p>${content}</p></blockquote>`);
-    quoteLines = [];
-  }
-
-  function flushFence() {
-    if (!inFence && fenceLines.length === 0 && !fenceLanguage) {
-      return;
-    }
-    const language = fenceLanguage ? ` data-language="${escapeAttribute(fenceLanguage)}"` : "";
-    blocks.push(`<pre><code${language}>${escapeHtml(fenceLines.join("\n"))}</code></pre>`);
-    inFence = false;
-    fenceLines = [];
-    fenceLanguage = "";
-  }
-
-  for (const line of lines) {
-    if (inFence) {
-      const fenceMatch = line.match(/^```(.*)$/);
-      if (fenceMatch) {
-        flushFence();
-        continue;
-      }
-      fenceLines.push(line);
-      continue;
-    }
-
-    const openingFence = line.match(/^```(.*)$/);
-    if (openingFence) {
-      flushParagraph();
-      flushList();
-      flushQuote();
-      inFence = true;
-      fenceLanguage = openingFence[1].trim();
-      fenceLines = [];
-      continue;
-    }
-
-    const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
-    if (headingMatch) {
-      flushParagraph();
-      flushList();
-      flushQuote();
-      const level = Math.min(headingMatch[1].length, 6);
-      blocks.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
-      continue;
-    }
-
-    const listMatch = line.match(/^\s*[-*]\s+(.*)$/);
-    if (listMatch) {
-      flushParagraph();
-      flushQuote();
-      listItems.push(listMatch[1]);
-      continue;
-    }
-
-    const quoteMatch = line.match(/^\s*>\s?(.*)$/);
-    if (quoteMatch) {
-      flushParagraph();
-      flushList();
-      quoteLines.push(quoteMatch[1]);
-      continue;
-    }
-
-    if (!line.trim()) {
-      flushParagraph();
-      flushList();
-      flushQuote();
-      continue;
-    }
-
-    paragraph.push(line);
-  }
-
-  flushParagraph();
-  flushList();
-  flushQuote();
-  flushFence();
-
-  return blocks.join("");
 }
 
 function hasRunningAgent() {
