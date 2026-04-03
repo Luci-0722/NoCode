@@ -57,7 +57,13 @@ async def _stream_prompt(agent, prompt: str) -> None:
                 }
             )
         elif event_type == "tool_end":
-            _emit({"type": "tool_end", "name": data[0]})
+            _emit(
+                {
+                    "type": "tool_end",
+                    "name": data[0],
+                    "output": data[1] if len(data) > 1 else "",
+                }
+            )
     _emit({"type": "done"})
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from uuid import uuid4
 
 from langchain.agents import create_agent
@@ -13,6 +14,31 @@ from src.compression import CompressionMiddleware, CompressionStrategy
 from src.prompts import build_main_system_prompt, build_subagent_system_prompt
 from src.skill_tools import load_skill, search_skills
 from src.tools import build_core_tools, make_subagent_tool
+
+
+def _render_tool_output(content) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content[:4000] + ("..." if len(content) > 4000 else "")
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                    continue
+                parts.append(json.dumps(item, ensure_ascii=False))
+                continue
+            parts.append(str(item))
+        rendered = "\n".join(part for part in parts if part).strip()
+        return rendered[:4000] + ("..." if len(rendered) > 4000 else "")
+    rendered = str(content)
+    return rendered[:4000] + ("..." if len(rendered) > 4000 else "")
 
 
 class MainAgent:
@@ -87,7 +113,11 @@ class MainAgent:
                 elif step == "tools":
                     for message in new_messages:
                         if isinstance(message, ToolMessage):
-                            yield ("tool_end", message.name or "tool")
+                            yield (
+                                "tool_end",
+                                message.name or "tool",
+                                _render_tool_output(message.content),
+                            )
 
 
 def _build_middleware(compression: dict | None):

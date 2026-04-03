@@ -4,11 +4,14 @@ version = "0.2.0"
 description = "NoCode AI agent companion"
 requires-python = ">=3.12"
 dependencies = [
+    "acp-sdk>=1.0.3",
+    "httpx>=0.28.0",
     "langchain>=0.3.0",
     "langchain-openai>=0.3.0",
     "langgraph>=0.2.0",
     "rich>=13.9.0",
     "pyyaml>=6.0.2",
+    "uvicorn>=0.42.0",
 ]
 
 [project.optional-dependencies]
@@ -16,9 +19,11 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 
 [project.scripts]
 nocode = "src.main:main"
+nocode-acp = "src.acp_server:main"
+nocode-web = "web.server:main"
 
 [tool.setuptools]
-packages = ["src"]
+packages = ["src", "web"]
 
 [build-system]
 requires = ["setuptools>=75.0"]

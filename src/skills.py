@@ -2,6 +2,7 @@
 
 import os
 import glob
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -47,7 +48,7 @@ class SkillRegistry:
                     if metadata:
                         self.skills[metadata.name] = metadata
                 except Exception as e:
-                    print(f"Warning: Failed to parse skill {skill_path}: {e}")
+                    print(f"Warning: Failed to parse skill {skill_path}: {e}", file=sys.stderr)
     
     def _parse_skill_metadata(self, skill_md: Path, skill_path: Path) -> Optional[SkillMetadata]:
         """解析技能元数据文件"""
@@ -98,7 +99,7 @@ class SkillRegistry:
                 path=skill_path
             )
         except Exception as e:
-            print(f"Error parsing skill metadata {skill_md}: {e}")
+            print(f"Error parsing skill metadata {skill_md}: {e}", file=sys.stderr)
             return None
     
     def get_all_skills(self) -> List[SkillMetadata]:
@@ -141,7 +142,7 @@ class SkillRegistry:
             self.loaded_skills[skill_name] = full_content
             return full_content
         except Exception as e:
-            print(f"Error loading skill content {skill_name}: {e}")
+            print(f"Error loading skill content {skill_name}: {e}", file=sys.stderr)
             return None
     
     def list_available_categories(self) -> List[str]:

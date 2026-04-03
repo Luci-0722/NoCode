@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NoCode ACP Multi-Agent</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="topbar-brand">
+          <div class="brand-orb" aria-hidden="true"></div>
+          <div>
+            <p class="eyebrow">ACP Orchestrator</p>
+            <h1>NoCode Multi-Agent</h1>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <div class="topbar-stats">
+            <span class="pill">Agent <strong id="hero-agent-count">0</strong></span>
+            <span class="pill">事件 <strong id="hero-event-count">0</strong></span>
+          </div>
+          <button id="open-settings" class="ghost-button topbar-button" type="button">设置 / Agent</button>
+        </div>
+      </header>
+
+      <main class="main-layout">
+        <section class="panel transcript-panel">
+          <div class="panel-head">
+            <div>
+              <h2>协作流</h2>
+            </div>
+            <span id="timeline-count" class="pill">0 条事件</span>
+          </div>
+          <div id="timeline" class="timeline"></div>
+        </section>
+
+        <section class="panel composer-panel">
+          <form id="message-form" class="stack">
+            <label>
+              <span>消息</span>
+              <div class="composer-field">
+                <textarea id="message-input" rows="3" placeholder="例如：@planner 帮我拆解 ACP 接入方案，再 @coder 生成实现骨架。"></textarea>
+                <div id="mention-menu" class="mention-menu hidden" role="listbox" aria-label="@ 提示"></div>
+              </div>
+            </label>
+            <div class="composer-actions">
+              <p id="composer-hint" class="muted">未写 `@` 时会广播给全部 agent。</p>
+              <div class="composer-buttons">
+                <button id="stop-discussions" class="ghost-button" type="button">停止讨论</button>
+                <button type="submit">发送</button>
+              </div>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <div id="settings-overlay" class="overlay hidden"></div>
+    <aside id="settings-drawer" class="drawer hidden" aria-hidden="true">
+      <div class="drawer-head">
+        <div>
+          <p class="eyebrow">Workspace</p>
+          <h2>Agent 设置</h2>
+        </div>
+        <button id="close-settings" class="ghost-button icon-button" type="button" aria-label="关闭设置">关闭</button>
+      </div>
+
+      <section class="drawer-section">
+        <div class="panel-head">
+          <div>
+            <h3>当前 Agent</h3>
+            <p class="section-note muted">管理上下文，查看状态，按需新增角色。</p>
+          </div>
+          <span id="agent-count" class="pill">0</span>
+        </div>
+        <div id="agent-list" class="agent-list"></div>
+      </section>
+
+      <section class="drawer-section">
+        <button id="open-agent-modal" type="button">新建 Agent</button>
+      </section>
+    </aside>
+
+    <div id="agent-modal" class="modal hidden" aria-hidden="true">
+      <div class="modal-card panel">
+        <div class="drawer-head">
+          <div>
+            <p class="eyebrow">Create Agent</p>
+            <h2>新建 Agent</h2>
+          </div>
+          <button id="close-agent-modal" class="ghost-button icon-button" type="button" aria-label="关闭新建 Agent">关闭</button>
+        </div>
+        <form id="agent-form" class="stack">
+          <label>
+            <span>名字</span>
+            <input id="agent-name" name="name" type="text" placeholder="例如 planner" maxlength="40" required />
+          </label>
+          <label>
+            <span>角色设定</span>
+            <textarea id="agent-prompt" name="system_prompt" rows="5" placeholder="例如：你负责需求拆解和任务编排。"></textarea>
+          </label>
+          <label>
+            <span>传输方式</span>
+            <select id="agent-transport" name="transport">
+              <option value="http">HTTP (ACP)</option>
+              <option value="stdio">STDIO</option>
+            </select>
+          </label>
+          <label id="agent-acp-name-field">
+            <span>绑定 ACP Agent</span>
+            <input id="agent-acp-name" name="acp_agent_name" list="acp-agent-options" placeholder="例如 nocode" />
+          </label>
+          <label id="agent-acp-base-url-field">
+            <span>ACP Base URL</span>
+            <input id="agent-acp-base-url" name="acp_base_url" type="text" placeholder="例如 http://127.0.0.1:8000" />
+          </label>
+          <label id="agent-stdio-command-field" class="hidden">
+            <span>STDIO 启动命令</span>
+            <input id="agent-stdio-command" name="stdio_command" type="text" placeholder="例如 python3 -m src.backend_stdio" />
+          </label>
+          <p id="agent-acp-hint" class="muted">填写这个 agent 自己要连接的 ACP 地址和本地 agent 名。</p>
+          <div class="modal-actions">
+            <button id="cancel-agent-modal" class="ghost-button" type="button">取消</button>
+            <button type="submit">创建 Agent</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <datalist id="acp-agent-options"></datalist>
+
+    <template id="agent-template">
+      <article class="agent-card">
+        <div class="agent-card-head">
+          <div>
+            <h3 class="agent-name"></h3>
+            <p class="agent-thread muted"></p>
+          </div>
+          <span class="agent-status"></span>
+        </div>
+        <p class="agent-prompt muted"></p>
+        <div class="agent-actions">
+          <button class="ghost-button agent-stop-button" type="button">停止</button>
+          <button class="ghost-button agent-clear-button" type="button">清空上下文</button>
+        </div>
+      </article>
+    </template>
+
+    <template id="event-template">
+      <article class="event-card">
+        <div class="event-head">
+          <div>
+            <p class="event-kind"></p>
+            <h3 class="event-title"></h3>
+          </div>
+          <time class="event-time"></time>
+        </div>
+        <p class="event-meta muted"></p>
+        <pre class="event-body"></pre>
+        <div class="mentions"></div>
+      </article>
+    </template>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
