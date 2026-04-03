@@ -5,11 +5,13 @@ temperature: 0.7
 subagent_model: glm-4.6
 subagent_temperature: 0.1
 
-# 压缩策略配置
+checkpoint_db_path: "nocode_agent/.state/langgraph-checkpoints.sqlite"
+acp_sessions_path: "nocode_agent/.state/acp-sessions.json"
+
 compression:
-  trigger_tokens: 8000     # 触发压缩的 token 估算阈值
-  keep_recent: 10          # 始终保留的最近消息数量
-  compressible_tools:      # 可被压缩删除的工具名称
+  trigger_tokens: 8000
+  keep_recent: 10
+  compressible_tools:
     - read
     - bash
     - glob

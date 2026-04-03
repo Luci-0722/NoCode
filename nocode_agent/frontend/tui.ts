@@ -105,7 +105,7 @@ class TypeScriptTui {
       ? path.join(process.cwd(), ".venv", "Scripts", "python.exe")
       : path.join(process.cwd(), ".venv", "bin", "python");
     const python = process.env.PYTHON_BIN || (fs.existsSync(localPython) ? localPython : (process.platform === "win32" ? "python" : "python3"));
-    this.backend = spawn(python, ["-m", "src.backend_stdio"], {
+    this.backend = spawn(python, ["-m", "nocode_agent.backend_stdio"], {
       cwd: process.cwd(),
       stdio: ["pipe", "pipe", "inherit"],
     });

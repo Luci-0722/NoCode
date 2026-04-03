@@ -8,26 +8,20 @@ import os
 import sys
 from typing import Any
 
-import yaml
-
-from src.agent import create_mainagent
+from nocode_agent.agent import create_mainagent
+from nocode_agent.config import load_config
 
 
 def _load_config() -> dict[str, Any]:
-    config_path = os.environ.get("BF_CONFIG", "config/default.yaml")
-    try:
-        with open(config_path, encoding="utf-8") as handle:
-            return yaml.safe_load(handle) or {}
-    except FileNotFoundError:
-        return {}
+    return load_config()
 
 
-def _build_agent(config: dict[str, Any]):
+async def _build_agent(config: dict[str, Any]):
     api_key = os.environ.get("ZHIPU_API_KEY", config.get("api_key", ""))
     if not api_key:
         raise RuntimeError("missing API key: set ZHIPU_API_KEY first")
 
-    return create_mainagent(
+    return await create_mainagent(
         api_key=api_key,
         model=config.get("model", "glm-4-flash"),
         base_url=config.get("base_url", "https://open.bigmodel.cn/api/paas/v4"),
@@ -36,6 +30,8 @@ def _build_agent(config: dict[str, Any]):
         compression=config.get("compression"),
         subagent_model=config.get("subagent_model"),
         subagent_temperature=config.get("subagent_temperature", 0.1),
+        thread_id=os.environ.get("NOCODE_THREAD_ID") or None,
+        persistence_config=config,
     )
 
 
@@ -54,6 +50,7 @@ async def _stream_prompt(agent, prompt: str) -> None:
                     "type": "tool_start",
                     "name": data[0],
                     "args": data[1] if len(data) > 1 else {},
+                    "tool_call_id": data[2] if len(data) > 2 else "",
                 }
             )
         elif event_type == "tool_end":
@@ -62,6 +59,7 @@ async def _stream_prompt(agent, prompt: str) -> None:
                     "type": "tool_end",
                     "name": data[0],
                     "output": data[1] if len(data) > 1 else "",
+                    "tool_call_id": data[2] if len(data) > 2 else "",
                 }
             )
     _emit({"type": "done"})
@@ -79,7 +77,7 @@ async def _handle_message(agent, payload: dict[str, Any]) -> bool:
         return True
 
     if message_type == "clear":
-        agent.clear()
+        await agent.clear()
         _emit({"type": "cleared", "thread_id": agent.thread_id})
         return True
 
@@ -105,7 +103,7 @@ async def _handle_message(agent, payload: dict[str, Any]) -> bool:
 async def main() -> int:
     try:
         config = _load_config()
-        agent = _build_agent(config)
+        agent = await _build_agent(config)
     except Exception as error:
         _emit({"type": "fatal", "message": str(error)})
         return 1

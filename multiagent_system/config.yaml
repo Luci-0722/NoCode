@@ -1,0 +1,11 @@
+multiagent_state_path: "multiagent_system/.state/state.json"
+session_registry_dir: "multiagent_system/.state/session-registries"
+
+acp_command: "python3 -m nocode_agent.acp_server"
+acp_agent_name: "nocode"
+
+work_environments:
+  - id: default
+    name: NoCode
+    cwd: "."
+    description: "默认工程目录"

@@ -132,7 +132,7 @@ def edit_file(file_path: str, old_text: str, new_text: str, replace_all: bool = 
 
 
 class GlobInput(BaseModel):
-    pattern: str = Field(description="glob 模式，例如 `src/**/*.py`。")
+    pattern: str = Field(description="glob 模式，例如 `nocode_agent/**/*.py`。")
 
 
 @tool("glob", args_schema=GlobInput)

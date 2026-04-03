@@ -6,23 +6,14 @@ import os
 import sys
 from typing import Any
 
-import yaml
 from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
 
-from src.agent import create_mainagent
+from nocode_agent.agent import create_mainagent
+from nocode_agent.config import load_config
 
 console = Console()
-
-
-def load_config(config_path: str | None = None) -> dict[str, Any]:
-    resolved = config_path or os.environ.get("NOCODE_CONFIG") or os.environ.get("BF_CONFIG", "config/default.yaml")
-    try:
-        with open(resolved, encoding="utf-8") as handle:
-            return yaml.safe_load(handle) or {}
-    except FileNotFoundError:
-        return {}
 
 
 def merge_config(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -36,13 +27,13 @@ def merge_config(config: dict[str, Any], args: argparse.Namespace) -> dict[str, 
     return merged
 
 
-def build_agent(config: dict[str, Any]):
+async def build_agent(config: dict[str, Any]):
     api_key = os.environ.get("ZHIPU_API_KEY", config.get("api_key", ""))
     if not api_key:
         console.print("[red]missing API key: set ZHIPU_API_KEY first.[/red]")
         raise SystemExit(1)
 
-    return create_mainagent(
+    return await create_mainagent(
         api_key=api_key,
         model=config.get("model", "glm-4-flash"),
         base_url=config.get("base_url", "https://open.bigmodel.cn/api/paas/v4"),
@@ -51,6 +42,7 @@ def build_agent(config: dict[str, Any]):
         compression=config.get("compression"),
         subagent_model=config.get("subagent_model"),
         subagent_temperature=config.get("subagent_temperature", 0.1),
+        persistence_config=config,
     )
 
 
@@ -120,7 +112,7 @@ async def run_chat(agent) -> None:
         if user_input in {"/quit", "/exit"}:
             break
         if user_input == "/clear":
-            agent.clear()
+            await agent.clear()
             console.clear()
             continue
         if user_input == "/help":
@@ -150,7 +142,7 @@ async def main_async(args: argparse.Namespace) -> int:
         render_models(config)
         return 0
 
-    agent = build_agent(config)
+    agent = await build_agent(config)
 
     if command == "chat":
         await run_chat(agent)
