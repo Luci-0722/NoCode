@@ -163,8 +163,39 @@ function renderInlineMarkdown(text) {
   return html;
 }
 
+function normalizeMarkdown(text) {
+  let source = String(text ?? "").replace(/\r\n/g, "\n").trim();
+  if (!source) {
+    return "";
+  }
+
+  source = source
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n");
+
+  // 将被压扁的 fenced code block 拆回独立行。
+  source = source.replace(/\s*```([^\n`]*)\s*/g, "\n```$1\n");
+
+  // 将行内出现的标题标记拆到新行，兼容 emoji 或中文后直接接 ## 的输出。
+  source = source.replace(/([^\n])\s*(#{1,6})(?=\S)/g, "$1\n$2 ");
+
+  // 将常见的列表项拆到新行，避免 “概览项目:1.xxx2.xxx” 这种一整段粘连。
+  source = source.replace(/([^\n])\s+([-*])\s+(?=\S)/g, "$1\n$2 ");
+  source = source.replace(/([^\n])\s+(\d+\.)\s+(?=\S)/g, "$1\n$2 ");
+
+  // 常见 emoji 章节标题单独成行，提升可读性。
+  source = source.replace(/([^\n])\s*((?:📍|📁|🎯|🎨|✅|⚠️|🧭|🕵️‍♀️|🛠️|🚀)+)(?=\S)/g, "$1\n$2 ");
+
+  // 代码块结束后若直接跟正文或标题，补一个换行。
+  source = source.replace(/```(\n?)(?=[^\n`#-*>\s])/g, "```\n");
+
+  return source
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function renderMarkdown(text) {
-  const source = String(text ?? "").replace(/\r\n/g, "\n");
+  const source = normalizeMarkdown(text);
   if (!source.trim()) {
     return "<p>(无内容)</p>";
   }
