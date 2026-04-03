@@ -136,6 +136,9 @@ function normalizeMarkdown(text) {
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n");
 
+  // 修复常见命令被压缩成 "python-mmodule" 的情况。
+  source = source.replace(/\b(python\d*)-m(?=[A-Za-z_])/g, "$1 -m ");
+
   // 将被压扁的 fenced code block 拆回独立行。
   source = source.replace(/\s*```([^\n`]*)\s*/g, "\n```$1\n");
 
@@ -145,9 +148,15 @@ function normalizeMarkdown(text) {
   // 将常见的列表项拆到新行，避免 “概览项目:1.xxx2.xxx” 这种一整段粘连。
   source = source.replace(/([^\n])\s+([-*])\s+(?=\S)/g, "$1\n$2 ");
   source = source.replace(/([^\n])\s+(\d+\.)\s+(?=\S)/g, "$1\n$2 ");
+  source = source.replace(/([：:])\s*([-*])(?=\S)/g, "$1\n$2 ");
+  source = source.replace(/([^\n])([-*])(?=[\u4e00-\u9fa5A-Za-z_][^:\n]{0,24}[：:])/g, "$1\n$2 ");
 
   // 常见 emoji 章节标题单独成行，提升可读性。
   source = source.replace(/([^\n])\s*((?:📍|📁|🎯|🎨|✅|⚠️|🧭|🕵️‍♀️|🛠️|🚀)+)(?=\S)/g, "$1\n$2 ");
+
+  // 将环境变量名、配置键等大写标识从说明文本中拆出，便于列表渲染。
+  source = source.replace(/([：:])\s*(?=[A-Z][A-Z0-9_]{2,}\b)/g, "$1\n");
+  source = source.replace(/([^\n])\s+([A-Z][A-Z0-9_]{2,}\b)(?=[：:])/g, "$1\n- $2");
 
   // 代码块结束后若直接跟正文或标题，补一个换行。
   source = source.replace(/```(\n?)(?=[^\n`#-*>\s])/g, "```\n");
