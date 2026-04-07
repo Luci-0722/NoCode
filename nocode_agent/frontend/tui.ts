@@ -181,6 +181,7 @@ const DISABLE_MOUSE_TRACKING = "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
 
 // SGR 鼠标事件正则：CSI < button ; col ; row M/m
 const SGR_MOUSE_RE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
+const SGR_MOUSE_PREFIX_RE = /^\x1b\[<\d*;?\d*;?\d*([Mm]?)$/;
 const CTRL_J_SEQUENCES = new Set(["\x0a", "\x1b[106;5u", "\x1b[27;5;106~"]);
 const CTRL_K_SEQUENCES = new Set(["\x0b", "\x1b[107;5u", "\x1b[27;5;107~"]);
 const CTRL_O_SEQUENCES = new Set(["\x0f", "\x1b[111;5u", "\x1b[27;5;111~"]);
@@ -278,6 +279,7 @@ class TypeScriptTui {
   private readonly pendingPrompts: PendingPrompt[] = [];
   private backend!: ChildProcessWithoutNullStreams;
   private backendBuffer = "";
+  private rawInputBuffer = "";
   private streaming = "";
   private threadId = "";
   private model = "-";
@@ -577,6 +579,92 @@ class TypeScriptTui {
   }
 
   private onRawInput(chunk: string): void {
+    this.rawInputBuffer += chunk;
+    this.processRawInputBuffer();
+  }
+
+  private processRawInputBuffer(): void {
+    while (this.rawInputBuffer.length > 0) {
+      const sequence = this.readNextControlSequence();
+      if (sequence === null) {
+        return;
+      }
+      if (sequence !== undefined) {
+        this.rawInputBuffer = this.rawInputBuffer.slice(sequence.length);
+        this.handleRawControlSequence(sequence);
+        continue;
+      }
+
+      const nextEsc = this.rawInputBuffer.indexOf("\x1b");
+      const plainText = nextEsc === -1
+        ? this.rawInputBuffer
+        : this.rawInputBuffer.slice(0, nextEsc);
+      if (!plainText) {
+        return;
+      }
+      this.rawInputBuffer = this.rawInputBuffer.slice(plainText.length);
+      this.flushKeyboardInput(plainText);
+    }
+  }
+
+  private readNextControlSequence(): string | null | undefined {
+    const input = this.rawInputBuffer;
+    if (!input) {
+      return undefined;
+    }
+
+    if (input.startsWith("\x1b[<")) {
+      const mouseEnd = input.match(/^\x1b\[<\d+;\d+;\d+[Mm]/);
+      if (mouseEnd) {
+        return mouseEnd[0];
+      }
+      if (SGR_MOUSE_PREFIX_RE.test(input)) {
+        return null;
+      }
+    }
+
+    if (input.startsWith("\x1b[M")) {
+      if (input.length >= 6) {
+        return input.slice(0, 6);
+      }
+      return null;
+    }
+
+    const exactSequences = [
+      ...CTRL_J_SEQUENCES,
+      ...CTRL_K_SEQUENCES,
+      ...CTRL_O_SEQUENCES,
+      "\x03",
+      "\x1b[99;5u",
+      "\x1b[99;6u",
+      "\x1b[27;5;99~",
+      "\x1b[27;6;99~",
+      "\x1b",
+      "\x1b[27u",
+      "\x1b[27;1u",
+      "\x1b[27~",
+      "\x1b[13;2u",
+      "\x1b[13;2~",
+      "\x1b[27;2;13~",
+      "\x1b[27;13;2~",
+    ];
+    for (const seq of exactSequences) {
+      if (input.startsWith(seq)) {
+        return seq;
+      }
+    }
+
+    if (input[0] === "\x1b") {
+      const maybePrefix = exactSequences.some((seq) => seq.startsWith(input));
+      if (maybePrefix) {
+        return null;
+      }
+    }
+
+    return undefined;
+  }
+
+  private handleRawControlSequence(chunk: string): void {
     if (this.nativeSelectionMode && !this.looksLikeMouseSequence(chunk)) {
       this.leaveNativeSelectionMode();
     }
@@ -606,24 +694,19 @@ class TypeScriptTui {
       this.shutdown();
       process.exit(0);
     }
-
-    // 处理鼠标事件（包括滚轮和选区），如果匹配则不再传递给键盘处理
     if (this.tryHandleMouseEvent(chunk)) {
       return;
     }
-
     if (this.isEscapeSequence(chunk)) {
       this.handleEscape();
       return;
     }
-
     if (this.isShiftEnterSequence(chunk)) {
       if (!this.showSessionPicker && !this.questionMode) {
         this.insertNewline();
       }
       return;
     }
-
     this.flushKeyboardInput(chunk);
   }
 
