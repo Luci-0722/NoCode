@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -136,20 +136,11 @@ class TypeScriptTui {
   private exiting = false;
   private lastFrame = "";
   private scrollOffset = 0;
-  private rawInputBuffer = "";
   private readonly keyInput = new PassThrough();
   private nextMessageId = 1;
   private nextToolId = 1;
   private selectedToolId: number | null = null;
   private followLatestTool = true;
-  private selectionAnchor: { row: number; col: number } | null = null;
-  private selectionFocus: { row: number; col: number } | null = null;
-  private draggingSelection = false;
-  private lastTranscriptVisibleAnsi: string[] = [];
-  private lastTranscriptVisiblePlain: string[] = [];
-  private lastTranscriptBaseIndex = 0;
-  private lastTranscriptScreenStartRow = 0;
-
   // ── Resume / session picker state ──────────────────────────
   private readonly resumeMode: boolean;
   private showSessionPicker = false;
@@ -379,25 +370,6 @@ class TypeScriptTui {
     this.flushKeyboardInput(chunk);
   }
 
-  private handleMouseEvent(code: number, col: number, row: number, kind: string): void {
-    if (code === 64) {
-      this.scrollTranscript(3);
-      return;
-    }
-    if (code === 65) {
-      this.scrollTranscript(-3);
-      return;
-    }
-
-    if (this.showSessionPicker || this.questionMode) {
-      return;
-    }
-
-    void col;
-    void row;
-    void kind;
-  }
-
   private flushKeyboardInput(text: string): void {
     if (!text) {
       return;
@@ -430,7 +402,6 @@ class TypeScriptTui {
         this.pendingPrompts.length = 0;
         this.selectedToolId = null;
         this.followLatestTool = true;
-        this.clearSelection();
         this.scrollOffset = 0;
         break;
       case "text":
@@ -568,7 +539,6 @@ class TypeScriptTui {
       this.pushHistory({
         kind: "message",
         role: "system",
-        content: "Commands: /help /clear /session /quit\nESC clear input / interrupt agent\nEnter submits\nShift+Enter inserts newline\nwheel/PgUp/PgDn 滚动  drag 选择文本  Ctrl+C 复制选区\nCtrl+J/K select tool  Ctrl+O expand tool result\n启动时加 --resume 可选择历史会话恢复",
         content: "Commands: /help /clear /session /quit\nESC clear input / interrupt agent\nEnter submits\nShift+Enter inserts newline\nwheel/PgUp/PgDn 滚动\nCtrl+J/K select tool  Ctrl+O expand tool result\n启动时加 --resume 可选择历史会话恢复",
       });
       this.render();
@@ -1214,10 +1184,7 @@ class TypeScriptTui {
     this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxOffset));
     const start = Math.max(0, blocks.length - height - this.scrollOffset);
     const visible = blocks.slice(start, start + height);
-    this.lastTranscriptBaseIndex = start;
-    this.lastTranscriptVisibleAnsi = visible.slice();
-    this.lastTranscriptVisiblePlain = visible.map((line) => this.stripAnsi(line));
-    this.lastTranscriptScreenStartRow = headerHeight + 1;
+    void headerHeight;
     const lines: string[] = [];
     lines.push(...visible);
     while (lines.length < height) {
@@ -1819,159 +1786,6 @@ class TypeScriptTui {
     return text.replace(/\x1b\[[0-9;]*m/g, "");
   }
 
-  private applySelectionToVisibleTranscript(lines: string[], baseIndex: number): string[] {
-    const range = this.getSelectionRange();
-    if (!range) {
-      return lines;
-    }
-
-    return lines.map((line, index) => {
-      const row = baseIndex + index;
-      if (row < range.start.row || row > range.end.row) {
-        return line;
-      }
-
-      const plain = this.stripAnsi(line);
-      const startCol = row === range.start.row ? range.start.col : 0;
-      const endCol = row === range.end.row ? range.end.col : this.visibleLength(plain);
-      if (endCol <= startCol) {
-        return line;
-      }
-      return this.highlightPlainRange(plain, startCol, endCol);
-    });
-  }
-
-  private highlightPlainRange(text: string, startCol: number, endCol: number): string {
-    const before = this.sliceByWidth(text, startCol);
-    const afterStart = text.slice(before.length);
-    const selected = this.sliceByWidth(afterStart, Math.max(0, endCol - startCol));
-    const after = afterStart.slice(selected.length);
-    return `${before}${COLOR.selectedBg}${COLOR.selectedText}${selected}${COLOR.reset}${after}`;
-  }
-
-  private translateMouseToSelectionPoint(col: number, row: number): { row: number; col: number } | null {
-    const relativeRow = row - this.lastTranscriptScreenStartRow;
-    if (relativeRow < 0 || relativeRow >= this.lastTranscriptVisiblePlain.length) {
-      return null;
-    }
-    const text = this.lastTranscriptVisiblePlain[relativeRow] ?? "";
-    return {
-      row: this.lastTranscriptBaseIndex + relativeRow,
-      col: this.columnToTextIndex(text, Math.max(0, col - 1)),
-    };
-  }
-
-  private columnToTextIndex(text: string, column: number): number {
-    if (column <= 0) {
-      return 0;
-    }
-    
-    let visible = 0;
-    let index = 0;
-    const chars = Array.from(text);
-    
-    for (let i = 0; i < chars.length; i++) {
-      const char = chars[i];
-      const width = this.charWidth(char);
-      
-      // 如果当前字符的起始位置就超过了目标列，返回当前位置
-      if (visible >= column) {
-        return i;
-      }
-      
-      // 如果当前字符的结束位置超过目标列，返回当前位置
-      if (visible + width > column) {
-        return i;
-      }
-      
-      visible += width;
-      index = i + 1;
-    }
-    
-    // 如果循环结束，说明所有字符都在目标列之前，返回字符总数
-    return chars.length;
-  }
-
-  private getSelectionRange(): { start: { row: number; col: number }; end: { row: number; col: number } } | null {
-    if (!this.selectionAnchor || !this.selectionFocus) {
-      return null;
-    }
-    const a = this.selectionAnchor;
-    const b = this.selectionFocus;
-    const anchorBeforeFocus = a.row < b.row || (a.row === b.row && a.col <= b.col);
-    const start = anchorBeforeFocus ? a : b;
-    const end = anchorBeforeFocus ? b : a;
-    if (start.row === end.row && start.col === end.col) {
-      return null;
-    }
-    return { start, end };
-  }
-
-  private hasSelection(): boolean {
-    return this.getSelectionRange() !== null;
-  }
-
-  private clearSelection(): void {
-    this.selectionAnchor = null;
-    this.selectionFocus = null;
-    this.draggingSelection = false;
-  }
-
-  private getSelectedText(): string {
-    const range = this.getSelectionRange();
-    if (!range) {
-      return "";
-    }
-    const blocks = this.buildTranscriptBlocks(process.stdout.columns || 120).map((line) => this.stripAnsi(line));
-    const parts: string[] = [];
-    for (let row = range.start.row; row <= range.end.row; row += 1) {
-      const text = blocks[row] ?? "";
-      const chars = Array.from(text);
-      const start = row === range.start.row ? range.start.col : 0;
-      const end = row === range.end.row ? range.end.col : chars.length;
-      parts.push(chars.slice(start, end).join(""));
-    }
-    return parts.join("\n");
-  }
-
-  private copySelectionToClipboard(): void {
-    const text = this.getSelectedText();
-    if (!text) {
-      return;
-    }
-
-    const commands: Array<{ cmd: string; args: string[] }> = process.platform === "darwin"
-      ? [{ cmd: "pbcopy", args: [] }]
-      : process.platform === "win32"
-        ? [{ cmd: "clip", args: [] }]
-        : [
-          { cmd: "wl-copy", args: [] },
-          { cmd: "xclip", args: ["-selection", "clipboard"] },
-          { cmd: "xsel", args: ["--clipboard", "--input"] },
-        ];
-
-    for (const command of commands) {
-      const result = spawnSync(command.cmd, command.args, {
-        input: text,
-        encoding: "utf8",
-      });
-      if (result.status === 0) {
-        this.pushHistory({
-          kind: "message",
-          role: "system",
-          content: "已复制当前选区。",
-        });
-        return;
-      }
-    }
-
-    this.pushHistory({
-      kind: "message",
-      role: "system",
-      content: "复制失败：当前环境没有可用的剪贴板命令。",
-    });
-  }
-
   private truncateAnsiAware(text: string, width: number): string {
     if (this.visibleLength(text) <= width) {
       return text;
@@ -2048,7 +1862,8 @@ class TypeScriptTui {
   }
 
   private enterAltScreen(): void {
-    process.stdout.write("\x1b[?1049h\x1b[?25h\x1b[?1000h\x1b[?1002h\x1b[?1006h");
+    // 禁用鼠标上报，保留终端原生文本选区与复制行为。
+    process.stdout.write("\x1b[?1049h\x1b[?25h");
   }
 
   private scrollTranscript(delta: number): void {
@@ -2087,7 +1902,7 @@ class TypeScriptTui {
   }
 
   private shutdown(): void {
-    process.stdout.write("\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?25h\x1b[?1049l");
+    process.stdout.write("\x1b[?25h\x1b[?1049l");
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(false);
     }
