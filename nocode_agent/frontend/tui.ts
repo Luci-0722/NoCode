@@ -324,6 +324,9 @@ class TypeScriptTui {
   private readonly wheelAccel = initWheelAccelState();
   private readonly xtermJsLike = isXtermJsLike();
   private readonly copyOnSelect = this.readCopyOnSelect();
+  private mouseTrackingEnabled = false;
+  private nativeSelectionMode = false;
+  private nativeSelectionTimer: NodeJS.Timeout | null = null;
 
   constructor() {
     this.resumeMode = process.argv.includes("--resume");
@@ -344,7 +347,7 @@ class TypeScriptTui {
     if (this.xtermJsLike) {
       return process.platform === "darwin" ? "Option+拖拽原生选择" : "Shift+拖拽原生选择";
     }
-    return "Shift+拖拽原生选择";
+    return process.platform === "darwin" ? "Option/Shift+拖拽原生选择" : "Shift+拖拽原生选择";
   }
 
   async start(): Promise<void> {
@@ -432,6 +435,9 @@ class TypeScriptTui {
   }
 
   private onKeypress(key: readline.Key): void {
+    if (this.nativeSelectionMode) {
+      this.leaveNativeSelectionMode();
+    }
     // ── Session picker mode ───────────────────────────────
     if (this.showSessionPicker) {
       if ((key.ctrl && key.name === "c") || (key.meta && key.name === "c")) {
@@ -572,6 +578,9 @@ class TypeScriptTui {
   }
 
   private onRawInput(chunk: string): void {
+    if (this.nativeSelectionMode && !this.looksLikeMouseSequence(chunk)) {
+      this.leaveNativeSelectionMode();
+    }
     if (this.isCtrlCSequence(chunk)) {
       if (this.showSessionPicker) {
         this.cancelSessionPicker("取消恢复，使用新会话。");
@@ -627,7 +636,10 @@ class TypeScriptTui {
       }
 
       if (hasShift || hasMeta) {
-        // 为终端保留原生选区手势，避免与自绘选区抢占同一套交互。
+        // 为终端保留原生选区手势：临时关闭鼠标跟踪，把后续拖拽交还给终端。
+        if (!isWheel && !isMotion && !isRelease) {
+          this.enterNativeSelectionMode();
+        }
         this.clearSelection();
         this.render();
         return false;
@@ -766,6 +778,51 @@ class TypeScriptTui {
     // 使用 OSC 52 剪贴板协议
     const base64 = Buffer.from(this.selectedText).toString("base64");
     process.stdout.write(`\x1b]52;c;${base64}\x07`);
+  }
+
+  private looksLikeMouseSequence(chunk: string): boolean {
+    return SGR_MOUSE_RE.test(chunk) || (chunk.length >= 3 && chunk.startsWith("\x1b[M"));
+  }
+
+  private enterNativeSelectionMode(): void {
+    if (this.nativeSelectionMode) {
+      this.bumpNativeSelectionTimer();
+      return;
+    }
+    this.nativeSelectionMode = true;
+    this.setMouseTracking(false);
+    this.bumpNativeSelectionTimer();
+  }
+
+  private leaveNativeSelectionMode(): void {
+    if (!this.nativeSelectionMode) {
+      return;
+    }
+    this.nativeSelectionMode = false;
+    if (this.nativeSelectionTimer) {
+      clearTimeout(this.nativeSelectionTimer);
+      this.nativeSelectionTimer = null;
+    }
+    this.setMouseTracking(true);
+    this.render();
+  }
+
+  private bumpNativeSelectionTimer(): void {
+    if (this.nativeSelectionTimer) {
+      clearTimeout(this.nativeSelectionTimer);
+    }
+    this.nativeSelectionTimer = setTimeout(() => {
+      this.nativeSelectionTimer = null;
+      this.leaveNativeSelectionMode();
+    }, 2500);
+  }
+
+  private setMouseTracking(enabled: boolean): void {
+    if (this.mouseTrackingEnabled === enabled) {
+      return;
+    }
+    process.stdout.write(enabled ? ENABLE_MOUSE_TRACKING : DISABLE_MOUSE_TRACKING);
+    this.mouseTrackingEnabled = enabled;
   }
 
   private copySelectionIfPresent(): boolean {
@@ -2426,7 +2483,8 @@ class TypeScriptTui {
       ? (this.copyOnSelect ? "  selection copied" : "  selection ctrl+c")
       : `  ${this.getNativeSelectionHint()}`;
     const wheelMode = this.xtermJsLike ? "wheel decay" : "wheel native";
-    const text = `Enter submit  Shift+Enter newline  Wheel/PgUp/PgDn scroll  Ctrl+J/K tool  Ctrl+O expand  ${wheelMode}${selection}  ${state}${queue}  ${this.subagentModel}${scroll}`;
+    const nativeSelectionState = this.nativeSelectionMode ? "  native-select active" : "";
+    const text = `Enter submit  Shift+Enter newline  Wheel/PgUp/PgDn scroll  Ctrl+J/K tool  Ctrl+O expand  ${wheelMode}${selection}${nativeSelectionState}  ${state}${queue}  ${this.subagentModel}${scroll}`;
     return ["", `${COLOR.secondary}${this.truncate(text, width)}${COLOR.reset}`];
   }
 
@@ -2581,7 +2639,8 @@ class TypeScriptTui {
 
   private enterAltScreen(): void {
     // 启用 alt screen、隐藏光标、扩展键盘协议、鼠标跟踪（滚轮+选区）
-    process.stdout.write(`\x1b[?1049h\x1b[?25h${ENABLE_KITTY_KEYBOARD}${ENABLE_MODIFY_OTHER_KEYS}${ENABLE_MOUSE_TRACKING}`);
+    process.stdout.write(`\x1b[?1049h\x1b[?25h${ENABLE_KITTY_KEYBOARD}${ENABLE_MODIFY_OTHER_KEYS}`);
+    this.setMouseTracking(true);
   }
 
   private scrollTranscript(delta: number): void {
@@ -2627,7 +2686,12 @@ class TypeScriptTui {
   }
 
   private shutdown(): void {
-    process.stdout.write(`${DISABLE_MOUSE_TRACKING}${DISABLE_MODIFY_OTHER_KEYS}${DISABLE_KITTY_KEYBOARD}\x1b[?25h\x1b[?1049l`);
+    if (this.nativeSelectionTimer) {
+      clearTimeout(this.nativeSelectionTimer);
+      this.nativeSelectionTimer = null;
+    }
+    this.setMouseTracking(false);
+    process.stdout.write(`${DISABLE_MODIFY_OTHER_KEYS}${DISABLE_KITTY_KEYBOARD}\x1b[?25h\x1b[?1049l`);
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(false);
     }
