@@ -254,11 +254,11 @@ class TypeScriptTui {
   private onKeypress(key: readline.Key): void {
     // ── Session picker mode ───────────────────────────────
     if (this.showSessionPicker) {
-      if (key.name === "up" || (key.ctrl && key.name === "k")) {
+      if (key.name === "up" || key.meta && key.name === "k") {
         this.moveSessionPicker(-1);
         return;
       }
-      if (key.name === "down" || (key.ctrl && key.name === "j")) {
+      if (key.name === "down" || key.meta && key.name === "j") {
         this.moveSessionPicker(1);
         return;
       }
@@ -288,20 +288,20 @@ class TypeScriptTui {
       process.exit(0);
     }
 
-    if (key.ctrl && key.name === "o") {
+    if ((key.ctrl && key.name === "o") || (key.meta && key.name === "o")) {
       this.toggleSelectedTool();
       return;
     }
 
-    const isCtrlJ = (key.ctrl && key.name === "j") || key.sequence === "\n";
-    const isCtrlK = (key.ctrl && key.name === "k") || key.sequence === "\x0b";
+    const isAltJ = key.meta && key.name === "j";
+    const isAltK = key.meta && key.name === "k";
 
-    if (isCtrlJ) {
+    if (isAltJ) {
       this.moveToolSelection(1);
       return;
     }
 
-    if (isCtrlK) {
+    if (isAltK) {
       this.moveToolSelection(-1);
       return;
     }
