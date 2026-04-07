@@ -12,6 +12,7 @@ import {
   isCtrlKSequence,
   isCtrlOSequence,
   isEscapeSequence,
+  isKeypressPassthroughSequence,
   isShiftEnterSequence,
   looksLikeMouseSequence,
 } from "./input_protocol.js";
@@ -508,21 +509,25 @@ class TypeScriptTui {
     if (this.nativeSelectionMode && !looksLikeMouseSequence(chunk)) {
       this.leaveNativeSelectionMode();
     }
+    if (isKeypressPassthroughSequence(chunk)) {
+      this.flushKeyboardInput(chunk);
+      return;
+    }
     if (!this.showSessionPicker && !this.questionMode) {
-      if (this.isCtrlJSequence(chunk)) {
+      if (isCtrlJSequence(chunk)) {
         this.moveToolSelection(1);
         return;
       }
-      if (this.isCtrlKSequence(chunk)) {
+      if (isCtrlKSequence(chunk)) {
         this.moveToolSelection(-1);
         return;
       }
     }
-    if (this.isCtrlOSequence(chunk)) {
+    if (isCtrlOSequence(chunk)) {
       this.toggleSelectedTool();
       return;
     }
-    if (this.isCtrlCSequence(chunk)) {
+    if (isCtrlCSequence(chunk)) {
       if (this.showSessionPicker) {
         this.cancelSessionPicker("取消恢复，使用新会话。");
         return;
@@ -537,11 +542,11 @@ class TypeScriptTui {
     if (this.tryHandleMouseEvent(chunk)) {
       return;
     }
-    if (this.isEscapeSequence(chunk)) {
+    if (isEscapeSequence(chunk)) {
       this.handleEscape();
       return;
     }
-    if (this.isShiftEnterSequence(chunk)) {
+    if (isShiftEnterSequence(chunk)) {
       if (!this.showSessionPicker && !this.questionMode) {
         this.insertNewline();
       }

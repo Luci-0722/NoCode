@@ -8,6 +8,20 @@ const CTRL_O_SEQUENCES = new Set(["\x0f", "\x1b[111;5u", "\x1b[27;5;111~"]);
 const CTRL_C_SEQUENCES = new Set(["\x03", "\x1b[99;5u", "\x1b[99;6u", "\x1b[27;5;99~", "\x1b[27;6;99~"]);
 const ESCAPE_SEQUENCES = new Set(["\x1b", "\x1b[27u", "\x1b[27;1u", "\x1b[27~"]);
 const SHIFT_ENTER_SEQUENCES = new Set(["\x1b[13;2u", "\x1b[13;2~", "\x1b[27;2;13~", "\x1b[27;13;2~"]);
+const KEYPRESS_PASSTHROUGH_SEQUENCES = new Set([
+  "\x1b[A",
+  "\x1b[B",
+  "\x1b[C",
+  "\x1b[D",
+  "\x1b[1~",
+  "\x1b[4~",
+  "\x1b[5~",
+  "\x1b[6~",
+  "\x1b[H",
+  "\x1b[F",
+  "\x1bOH",
+  "\x1bOF",
+]);
 
 const EXACT_CONTROL_SEQUENCES = [
   ...CTRL_J_SEQUENCES,
@@ -16,6 +30,7 @@ const EXACT_CONTROL_SEQUENCES = [
   ...CTRL_C_SEQUENCES,
   ...ESCAPE_SEQUENCES,
   ...SHIFT_ENTER_SEQUENCES,
+  ...KEYPRESS_PASSTHROUGH_SEQUENCES,
 ];
 
 export type RawInputToken =
@@ -44,6 +59,10 @@ export function isEscapeSequence(chunk: string): boolean {
 
 export function isShiftEnterSequence(chunk: string): boolean {
   return SHIFT_ENTER_SEQUENCES.has(chunk);
+}
+
+export function isKeypressPassthroughSequence(chunk: string): boolean {
+  return KEYPRESS_PASSTHROUGH_SEQUENCES.has(chunk);
 }
 
 export function looksLikeMouseSequence(chunk: string): boolean {
