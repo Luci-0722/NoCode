@@ -272,12 +272,15 @@ class TypeScriptTui {
       return;
     }
 
-    if (key.ctrl && key.name === "j") {
+    const isCtrlJ = (key.ctrl && key.name === "j") || key.sequence === "\n";
+    const isCtrlK = (key.ctrl && key.name === "k") || key.sequence === "\x0b";
+
+    if (isCtrlJ) {
       this.moveToolSelection(1);
       return;
     }
 
-    if (key.ctrl && key.name === "k") {
+    if (isCtrlK) {
       this.moveToolSelection(-1);
       return;
     }
