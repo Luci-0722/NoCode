@@ -17,7 +17,11 @@ class SkillExpander:
     def __init__(self, shell_timeout: int = 10):
         self.shell_timeout = shell_timeout
 
-    async def expand(self, entry: SkillEntry, args: str | None = None) -> str:
+    async def expand(
+        self,
+        entry: SkillEntry,
+        args: str | list[str] | None = None,
+    ) -> str:
         """Expand skill content and return the final text."""
         content = entry.markdown_content
 
@@ -66,13 +70,14 @@ class SkillExpander:
     def _substitute_arguments(
         self,
         content: str,
-        args: str | None,
+        args: str | list[str] | None,
         named_args: list[str],
     ) -> str:
-        if not args:
+        args_text, parts = self._normalize_args(args)
+        if not args_text:
             return content
 
-        parts = self._split_args(args)
+        had_arguments_placeholder = "$ARGUMENTS" in content
 
         # Positional: $1, $2, ...
         for i, part in enumerate(parts):
@@ -80,7 +85,7 @@ class SkillExpander:
             content = content.replace(f"${i + 1}", part)
 
         # $ARGUMENTS — full argument string
-        content = content.replace("$ARGUMENTS", args)
+        content = content.replace("$ARGUMENTS", args_text)
 
         # $ARGUMENTS[N] — indexed access
         for i, part in enumerate(parts):
@@ -92,10 +97,28 @@ class SkillExpander:
                 content = content.replace(f"${name}", parts[i])
 
         # If no placeholder was found, append args at the end
-        if "$ARGUMENTS" not in content and not named_args:
-            content += f"\n\nArguments: {args}"
+        if not had_arguments_placeholder and not named_args:
+            content += f"\n\nArguments: {args_text}"
 
         return content
+
+    def _normalize_args(
+        self,
+        args: str | list[str] | None,
+    ) -> tuple[str | None, list[str]]:
+        if args is None:
+            return None, []
+
+        if isinstance(args, list):
+            parts = [str(part) for part in args if str(part)]
+            if not parts:
+                return None, []
+            return " ".join(parts), parts
+
+        args_text = args.strip()
+        if not args_text:
+            return None, []
+        return args_text, self._split_args(args_text)
 
     # ------------------------------------------------------------------
     # Shell command execution

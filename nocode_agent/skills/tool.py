@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 async def invoke_skill(
     skill_name: str,
     args: str | None = None,
+    v__args: list[str] | None = None,
 ) -> str:
     """Invoke a skill by name.
 
@@ -26,6 +27,7 @@ async def invoke_skill(
     Args:
         skill_name: The skill to invoke.
         args: Optional arguments to pass to the skill.
+        v__args: Compatibility field for positional arguments emitted by some tool callers.
     """
     registry = get_skill_registry()
     entry = registry.get(skill_name)
@@ -40,7 +42,12 @@ async def invoke_skill(
 
     # Expand skill content
     expander = SkillExpander()
-    expanded = await expander.expand(entry, args)
+    expanded_args: str | list[str] | None = args
+    # 兼容部分调用方将位置参数打包为 v__args 的形式。
+    if v__args:
+        expanded_args = [*([args] if args else []), *v__args]
+
+    expanded = await expander.expand(entry, expanded_args)
     logger.info("Skill invoked: %s", skill_name)
 
     # Record for compression recovery
