@@ -31,7 +31,7 @@ const EXACT_CONTROL_SEQUENCES = [
   ...ESCAPE_SEQUENCES,
   ...SHIFT_ENTER_SEQUENCES,
   ...KEYPRESS_PASSTHROUGH_SEQUENCES,
-];
+].sort((left, right) => right.length - left.length);
 
 export type RawInputToken =
   | { kind: "control"; value: string }
@@ -100,6 +100,18 @@ export class RawInputParser {
     return tokens;
   }
 
+  hasPendingEscapePrefix(): boolean {
+    return this.buffer === "\x1b";
+  }
+
+  flushPendingEscape(): RawInputToken[] {
+    if (!this.hasPendingEscapePrefix()) {
+      return [];
+    }
+    this.buffer = "";
+    return [{ kind: "control", value: "\x1b" }];
+  }
+
   private readNextControlSequence(): string | null | undefined {
     const input = this.buffer;
     if (!input) {
@@ -120,6 +132,12 @@ export class RawInputParser {
       if (input.length >= 6) {
         return input.slice(0, 6);
       }
+      return null;
+    }
+
+    // 单独的 ESC 既可能是真正的 Escape，也可能是方向键等 CSI 序列的前缀。
+    // 这里只在看到后续字节时再立即确认，避免把箭头键拆成 ESC + "[A"。
+    if (input === "\x1b") {
       return null;
     }
 

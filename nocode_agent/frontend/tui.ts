@@ -6,6 +6,7 @@ import readline from "node:readline";
 import { PassThrough } from "node:stream";
 import {
   RawInputParser,
+  type RawInputToken,
   SGR_MOUSE_RE,
   isCtrlCSequence,
   isCtrlJSequence,
@@ -259,6 +260,7 @@ class TypeScriptTui {
   private mouseTrackingEnabled = false;
   private nativeSelectionMode = false;
   private nativeSelectionTimer: NodeJS.Timeout | null = null;
+  private rawEscapeTimer: NodeJS.Timeout | null = null;
 
   constructor() {
     this.resumeMode = process.argv.includes("--resume");
@@ -495,8 +497,23 @@ class TypeScriptTui {
   }
 
   private onRawInput(chunk: string): void {
+    if (this.rawEscapeTimer) {
+      clearTimeout(this.rawEscapeTimer);
+      this.rawEscapeTimer = null;
+    }
     this.rawInputParser.push(chunk);
-    for (const token of this.rawInputParser.drain()) {
+    this.handleRawTokens(this.rawInputParser.drain());
+    if (this.rawInputParser.hasPendingEscapePrefix()) {
+      // 给方向键等转义序列一个极短窗口补齐；若没有后续字节，再按独立 ESC 处理。
+      this.rawEscapeTimer = setTimeout(() => {
+        this.rawEscapeTimer = null;
+        this.handleRawTokens(this.rawInputParser.flushPendingEscape());
+      }, 25);
+    }
+  }
+
+  private handleRawTokens(tokens: RawInputToken[]): void {
+    for (const token of tokens) {
       if (token.kind === "control") {
         this.handleRawControlSequence(token.value);
       } else {
@@ -2602,6 +2619,10 @@ class TypeScriptTui {
   }
 
   private shutdown(): void {
+    if (this.rawEscapeTimer) {
+      clearTimeout(this.rawEscapeTimer);
+      this.rawEscapeTimer = null;
+    }
     if (this.nativeSelectionTimer) {
       clearTimeout(this.nativeSelectionTimer);
       this.nativeSelectionTimer = null;
