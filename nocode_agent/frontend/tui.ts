@@ -344,10 +344,8 @@ class TypeScriptTui {
   }
 
   private getNativeSelectionHint(): string {
-    if (this.xtermJsLike) {
-      return process.platform === "darwin" ? "Option+拖拽原生选择" : "Shift+拖拽原生选择";
-    }
-    return process.platform === "darwin" ? "Option/Shift+拖拽原生选择" : "Shift+拖拽原生选择";
+    void this.xtermJsLike;
+    return "Shift+拖拽原生选择";
   }
 
   async start(): Promise<void> {
@@ -444,11 +442,11 @@ class TypeScriptTui {
         this.cancelSessionPicker("取消恢复，使用新会话。");
         return;
       }
-      if (key.name === "up" || key.meta && key.name === "k") {
+      if (key.name === "up") {
         this.moveSessionPicker(-1);
         return;
       }
-      if (key.name === "down" || key.meta && key.name === "j") {
+      if (key.name === "down") {
         this.moveSessionPicker(1);
         return;
       }
@@ -493,22 +491,20 @@ class TypeScriptTui {
       process.exit(0);
     }
 
-    if ((key.ctrl && key.name === "o") || (key.meta && key.name === "o")) {
+    if (key.ctrl && key.name === "o") {
       this.toggleSelectedTool();
       return;
     }
 
-    const isAltJ = key.meta && key.name === "j";
-    const isAltK = key.meta && key.name === "k";
     const isCtrlJ = key.ctrl && key.name === "j";
     const isCtrlK = key.ctrl && key.name === "k";
 
-    if (isAltJ || isCtrlJ) {
+    if (isCtrlJ) {
       this.moveToolSelection(1);
       return;
     }
 
-    if (isAltK || isCtrlK) {
+    if (isCtrlK) {
       this.moveToolSelection(-1);
       return;
     }
@@ -580,6 +576,10 @@ class TypeScriptTui {
   private onRawInput(chunk: string): void {
     if (this.nativeSelectionMode && !this.looksLikeMouseSequence(chunk)) {
       this.leaveNativeSelectionMode();
+    }
+    if (chunk === "\x0f") {
+      this.toggleSelectedTool();
+      return;
     }
     if (this.isCtrlCSequence(chunk)) {
       if (this.showSessionPicker) {
@@ -1110,7 +1110,7 @@ class TypeScriptTui {
       this.pushHistory({
         kind: "message",
         role: "system",
-        content: `Commands: /help /clear /session /resume [/continue] /quit\nESC 清空输入 / 中断生成\nEnter 发送，Shift+Enter 换行\n鼠标滚轮支持加速度滚动；拖拽可选择文本${this.copyOnSelect ? "并自动复制" : "，按 Ctrl+C 复制"}\n${this.getNativeSelectionHint()}\nCtrl+J/K 或 Alt+J/K 选择工具，Ctrl+O 或 Alt+O 展开工具\n/resume 支持直接输入 thread id 后缀或预览关键词进行过滤恢复\n环境变量: NOCODE_COPY_ON_SELECT=0/1, NOCODE_SCROLL_SPEED=<number>`,
+        content: `Commands: /help /clear /session /resume [/continue] /quit\nESC 清空输入 / 中断生成\nEnter 发送，Shift+Enter 换行\n拖拽可选择文本${this.copyOnSelect ? "并自动复制" : "，按 Ctrl+C 复制"}\n${this.getNativeSelectionHint()}\nCtrl+J/K 选择工具，Ctrl+O 展开工具\n/resume 支持直接输入 thread id 后缀或预览关键词进行过滤恢复\n环境变量: NOCODE_COPY_ON_SELECT=0/1, NOCODE_SCROLL_SPEED=<number>`,
       });
       this.render();
       return;
@@ -2505,7 +2505,7 @@ class TypeScriptTui {
       : `  ${this.getNativeSelectionHint()}`;
     const wheelMode = this.xtermJsLike ? "wheel decay" : "wheel native";
     const nativeSelectionState = this.nativeSelectionMode ? "  native-select active" : "";
-    const text = `Enter submit  Shift+Enter newline  Wheel/PgUp/PgDn scroll  Ctrl+J/K tool  Ctrl+O expand  ${wheelMode}${selection}${nativeSelectionState}  ${state}${queue}  ${this.subagentModel}${scroll}`;
+    const text = `Enter submit  Shift+Enter newline  Ctrl+J/K tool  Ctrl+O expand  ${wheelMode}${selection}${nativeSelectionState}  ${state}${queue}  ${this.subagentModel}${scroll}`;
     return ["", `${COLOR.secondary}${this.truncate(text, width)}${COLOR.reset}`];
   }
 
