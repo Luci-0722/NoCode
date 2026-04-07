@@ -2101,7 +2101,7 @@ class TypeScriptTui {
   }
 
   private enterAltScreen(): void {
-    process.stdout.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h");
+    process.stdout.write("\x1b[?1049h\x1b[?25h\x1b[?1000h\x1b[?1002h\x1b[?1006h");
   }
 
   private scrollTranscript(delta: number): void {
