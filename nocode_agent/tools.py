@@ -26,28 +26,6 @@ logger = logging.getLogger(__name__)
 _MAX_OUTPUT = 12_000
 _TODO_STORE: list[str] = []
 
-# ── Shared state for ask_user_question pause/resume ──
-_pending_question_future: asyncio.Future | None = None
-
-
-def set_question_future(future: asyncio.Future) -> None:
-    global _pending_question_future
-    _pending_question_future = future
-
-
-def resolve_question_future(answer: dict) -> None:
-    global _pending_question_future
-    if _pending_question_future is not None and not _pending_question_future.done():
-        _pending_question_future.set_result(answer)
-    _pending_question_future = None
-
-
-def cancel_question_future() -> None:
-    global _pending_question_future
-    if _pending_question_future is not None and not _pending_question_future.done():
-        _pending_question_future.cancel()
-    _pending_question_future = None
-
 
 def _workspace_root() -> Path:
     return Path.cwd().resolve()
@@ -300,15 +278,39 @@ class GrepInput(BaseModel):
     max_matches: int = Field(default=200, ge=1, le=2000, description="最多返回多少条结果。")
 
 
-# ── rg 可用性检测（启动时检查一次）────────────────────────────────
-_rg_available: bool | None = None
+# ── rg 二进制检测（启动时检查一次）────────────────────────────────
+_rg_path: str | None = None
 
 
-def _is_rg_available() -> bool:
-    global _rg_available
-    if _rg_available is None:
-        _rg_available = shutil.which("rg") is not None
-    return _rg_available
+def _find_rg_binary() -> str | None:
+    """查找可用的 rg 二进制。优先级：项目内置 > 系统 PATH。"""
+    # 1. 项目内置 rg（nocode_agent/bin/rg-{platform}-{arch}）
+    platform_key = f"{os.uname().sysname.lower()}-{os.uname().machine.lower()}"
+    # 标准化架构名
+    arch = os.uname().machine.lower()
+    if arch in ("x86_64", "amd64"):
+        arch = "x86_64"
+    elif arch in ("arm64", "aarch64"):
+        arch = "arm64"
+    platform_key = f"{os.uname().sysname.lower()}-{arch}"
+
+    bundled = Path(__file__).parent / "bin" / f"rg-{platform_key}"
+    if bundled.exists() and os.access(str(bundled), os.X_OK):
+        return str(bundled)
+
+    # 2. 系统 PATH 中的 rg
+    system_rg = shutil.which("rg")
+    if system_rg:
+        return system_rg
+
+    return None
+
+
+def _get_rg_path() -> str | None:
+    global _rg_path
+    if _rg_path is None:
+        _rg_path = _find_rg_binary()
+    return _rg_path
 
 
 def _grep_with_rg(
@@ -320,10 +322,11 @@ def _grep_with_rg(
     max_matches: int,
 ) -> str | None:
     """用 ripgrep 执行搜索。返回结果字符串，或 None 表示 rg 不可用/出错。"""
-    if not _is_rg_available():
+    rg = _get_rg_path()
+    if not rg:
         return None
 
-    cmd = ["rg", "--no-config", "--no-ignore-vcs"]
+    cmd = [rg, "--no-config", "--no-ignore-vcs"]
     workspace = _workspace_root()
     cwd = str(base)
 
@@ -650,7 +653,7 @@ class AskUserQuestionInput(BaseModel):
 
 
 @tool("ask_user_question", args_schema=AskUserQuestionInput)
-async def ask_user_question(questions: list[dict]) -> str:
+def ask_user_question(questions: list[dict]) -> str:
     """向用户提出结构化问题以澄清需求或选择方案。
 
     只在需要用户输入来消除歧义时使用。不要用于：
@@ -661,24 +664,30 @@ async def ask_user_question(questions: list[dict]) -> str:
     if not questions:
         return "错误：问题列表不能为空。"
 
-    # ── Pause and wait for user input via Future ──
-    loop = asyncio.get_running_loop()
-    future: asyncio.Future = loop.create_future()
-    set_question_future(future)
+    validated: list[dict] = []
+    for i, q in enumerate(questions):
+        if not isinstance(q, dict) or not q.get("question"):
+            return f"错误：第 {i + 1} 个问题缺少必填的 'question' 字段。"
+        entry: dict = {"question": str(q["question"])}
+        if q.get("header"):
+            entry["header"] = str(q["header"])[:12]
+        if isinstance(q.get("options"), list) and q["options"]:
+            opts = []
+            for opt in q["options"][:4]:
+                if isinstance(opt, dict) and opt.get("label"):
+                    opts.append({
+                        "label": str(opt["label"]),
+                        "description": str(opt.get("description", "")),
+                    })
+                elif isinstance(opt, str):
+                    opts.append({"label": opt, "description": ""})
+            if len(opts) >= 2:
+                entry["options"] = opts
+        if isinstance(q.get("multiSelect"), bool):
+            entry["multiSelect"] = q["multiSelect"]
+        validated.append(entry)
 
-    try:
-        answer = await future
-    except asyncio.CancelledError:
-        return json.dumps({
-            "type": "ask_user_question_cancelled",
-            "reason": "stream was cancelled",
-        }, ensure_ascii=False)
-
-    # answer: {"answers": [{"question_index": 0, "selected": ["label"]}]}
-    return json.dumps({
-        "type": "ask_user_question_answer",
-        "answers": answer.get("answers", []),
-    }, ensure_ascii=False)
+    return json.dumps({"type": "ask_user_question", "questions": validated}, ensure_ascii=False)
 
 
 class TodoInput(BaseModel):

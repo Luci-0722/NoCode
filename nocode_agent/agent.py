@@ -201,6 +201,13 @@ class MainAgent:
                 result.files_restored,
             )
 
+            # 压缩成功后清空 FileStateCache
+            # 原因：上下文已被压缩，LLM 不再拥有之前读取的文件内容。
+            # 如果不清空，再次 read 会返回 FILE_UNCHANGED_STUB 跳过内容，
+            # 导致 LLM 在压缩后丢失文件上下文。
+            from nocode_agent.file_state import get_file_state_cache
+            get_file_state_cache().clear()
+
             # 用压缩后的消息替换当前状态
             await self._agent.aupdate_state(
                 config,
