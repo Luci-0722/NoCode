@@ -377,6 +377,11 @@ class TypeScriptTui {
       process.exit(0);
     }
 
+    if (this.isEscapeSequence(chunk)) {
+      this.handleEscape();
+      return;
+    }
+
     if (this.isShiftEnterSequence(chunk)) {
       if (!this.showSessionPicker && !this.questionMode) {
         this.insertNewline();
@@ -401,6 +406,36 @@ class TypeScriptTui {
       || chunk === "\x1b[99;6u"
       || chunk === "\x1b[27;5;99~"
       || chunk === "\x1b[27;6;99~";
+  }
+
+  private isEscapeSequence(chunk: string): boolean {
+    return chunk === "\x1b"
+      || chunk === "\x1b[27u"
+      || chunk === "\x1b[27;1u"
+      || chunk === "\x1b[27~";
+  }
+
+  private handleEscape(): void {
+    if (this.showSessionPicker) {
+      this.showSessionPicker = false;
+      this.pushHistory({ kind: "message", role: "system", content: "取消恢复，使用新会话。" });
+      this.render();
+      return;
+    }
+
+    if (this.questionMode) {
+      this.submitQuestionAnswer([]);
+      return;
+    }
+
+    if (this.inputLines.some((line) => line.length > 0)) {
+      this.clearInput();
+      return;
+    }
+
+    if (this.generating) {
+      this.sendBackend({ type: "cancel" });
+    }
   }
 
   private flushKeyboardInput(text: string): void {
