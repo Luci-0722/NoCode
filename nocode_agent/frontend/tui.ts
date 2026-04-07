@@ -273,7 +273,7 @@ class TypeScriptTui {
     }
 
     // ── Normal input mode ─────────────────────────────────
-    if (key.ctrl && key.name === "c") {
+    if ((key.ctrl && key.name === "c") || (key.meta && key.name === "c")) {
       if (this.hasSelection()) {
         this.copySelectionToClipboard();
         this.clearSelection();
