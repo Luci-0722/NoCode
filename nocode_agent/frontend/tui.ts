@@ -1,9 +1,34 @@
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import readline from "node:readline";
 import { PassThrough } from "node:stream";
+import {
+  RawInputParser,
+  SGR_MOUSE_RE,
+  isCtrlCSequence,
+  isCtrlJSequence,
+  isCtrlKSequence,
+  isCtrlOSequence,
+  isEscapeSequence,
+  isShiftEnterSequence,
+  looksLikeMouseSequence,
+} from "./input_protocol.js";
+import {
+  computeWheelStep,
+  copyTextToNativeClipboard,
+  DISABLE_KITTY_KEYBOARD,
+  DISABLE_MODIFY_OTHER_KEYS,
+  DISABLE_MOUSE_TRACKING,
+  ENABLE_KITTY_KEYBOARD,
+  ENABLE_MODIFY_OTHER_KEYS,
+  ENABLE_MOUSE_TRACKING,
+  initWheelAccelState,
+  isXtermJsLike,
+  readCopyOnSelect,
+  type WheelAccelState,
+} from "./terminal_utils.js";
 
 type Role = "user" | "assistant" | "system";
 
@@ -170,107 +195,8 @@ const COLOR = {
   },
 };
 
-const ENABLE_KITTY_KEYBOARD = "\x1b[>1u";
-const DISABLE_KITTY_KEYBOARD = "\x1b[<u";
-const ENABLE_MODIFY_OTHER_KEYS = "\x1b[>4;2m";
-const DISABLE_MODIFY_OTHER_KEYS = "\x1b[>4m";
-
-// 鼠标跟踪：1000 基础按钮/滚轮，1002 拖拽，1003 全移动，1006 SGR 编码
-const ENABLE_MOUSE_TRACKING = "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
-const DISABLE_MOUSE_TRACKING = "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
-
-// SGR 鼠标事件正则：CSI < button ; col ; row M/m
-const SGR_MOUSE_RE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
-const SGR_MOUSE_PREFIX_RE = /^\x1b\[<\d*;?\d*;?\d*([Mm]?)$/;
-const CTRL_J_SEQUENCES = new Set(["\x0a", "\x1b[106;5u", "\x1b[27;5;106~"]);
-const CTRL_K_SEQUENCES = new Set(["\x0b", "\x1b[107;5u", "\x1b[27;5;107~"]);
-const CTRL_O_SEQUENCES = new Set(["\x0f", "\x1b[111;5u", "\x1b[27;5;111~"]);
-
 // 选区颜色（半透明蓝底）
 const SELECTION_BG = "\x1b[48;2;40;70;110m";
-
-const WHEEL_ACCEL_WINDOW_MS = 40;
-const WHEEL_ACCEL_STEP = 0.3;
-const WHEEL_ACCEL_MAX = 6;
-const WHEEL_DECAY_HALFLIFE_MS = 150;
-const WHEEL_DECAY_STEP = 5;
-const WHEEL_BURST_MS = 5;
-const WHEEL_DECAY_GAP_MS = 80;
-const WHEEL_DECAY_CAP_SLOW = 3;
-const WHEEL_DECAY_CAP_FAST = 6;
-const WHEEL_DECAY_IDLE_MS = 500;
-
-type WheelAccelState = {
-  time: number;
-  mult: number;
-  dir: 0 | 1 | -1;
-  xtermJs: boolean;
-  frac: number;
-  base: number;
-};
-
-function isXtermJsLike(): boolean {
-  return process.env.TERM_PROGRAM === "vscode"
-    || process.env.CURSOR_TRACE_ID !== undefined
-    || process.env.WINDSURF_SESSION_ID !== undefined
-    || process.env.VSCODE_GIT_IPC_HANDLE !== undefined;
-}
-
-function readScrollSpeedBase(): number {
-  const raw = process.env.NOCODE_SCROLL_SPEED || process.env.CLAUDE_CODE_SCROLL_SPEED;
-  if (!raw) return 1;
-  const value = Number.parseFloat(raw);
-  if (Number.isNaN(value) || value <= 0) {
-    return 1;
-  }
-  return Math.min(value, 20);
-}
-
-function initWheelAccelState(): WheelAccelState {
-  const base = readScrollSpeedBase();
-  return {
-    time: 0,
-    mult: base,
-    dir: 0,
-    xtermJs: isXtermJsLike(),
-    frac: 0,
-    base,
-  };
-}
-
-function computeWheelStep(state: WheelAccelState, dir: 1 | -1, now: number): number {
-  const gap = now - state.time;
-  if (!state.xtermJs) {
-    if (dir !== state.dir || gap > WHEEL_ACCEL_WINDOW_MS) {
-      state.mult = state.base;
-    } else {
-      const cap = Math.max(WHEEL_ACCEL_MAX, state.base * 2);
-      state.mult = Math.min(cap, state.mult + WHEEL_ACCEL_STEP);
-    }
-    state.dir = dir;
-    state.time = now;
-    return Math.max(1, Math.floor(state.mult));
-  }
-
-  const sameDir = dir === state.dir;
-  state.time = now;
-  state.dir = dir;
-  if (sameDir && gap < WHEEL_BURST_MS) {
-    return 1;
-  }
-  if (!sameDir || gap > WHEEL_DECAY_IDLE_MS) {
-    state.mult = Math.max(2, state.base);
-    state.frac = 0;
-  } else {
-    const m = Math.pow(0.5, gap / WHEEL_DECAY_HALFLIFE_MS);
-    const cap = gap >= WHEEL_DECAY_GAP_MS ? WHEEL_DECAY_CAP_SLOW : WHEEL_DECAY_CAP_FAST;
-    state.mult = Math.min(cap, 1 + (state.mult - 1) * m + WHEEL_DECAY_STEP * m);
-  }
-  const total = state.mult + state.frac;
-  const rows = Math.max(1, Math.floor(total));
-  state.frac = total - rows;
-  return rows;
-}
 
 class TypeScriptTui {
   private readonly version = "NoCode";
@@ -279,7 +205,6 @@ class TypeScriptTui {
   private readonly pendingPrompts: PendingPrompt[] = [];
   private backend!: ChildProcessWithoutNullStreams;
   private backendBuffer = "";
-  private rawInputBuffer = "";
   private streaming = "";
   private threadId = "";
   private model = "-";
@@ -328,24 +253,14 @@ class TypeScriptTui {
   private selectionRanges: Array<{ row: number; startCol: number; endCol: number }> = [];
   private readonly wheelAccel = initWheelAccelState();
   private readonly xtermJsLike = isXtermJsLike();
-  private readonly copyOnSelect = this.readCopyOnSelect();
+  private readonly copyOnSelect = readCopyOnSelect();
+  private readonly rawInputParser = new RawInputParser();
   private mouseTrackingEnabled = false;
   private nativeSelectionMode = false;
   private nativeSelectionTimer: NodeJS.Timeout | null = null;
 
   constructor() {
     this.resumeMode = process.argv.includes("--resume");
-  }
-
-  private readCopyOnSelect(): boolean {
-    const raw = process.env.NOCODE_COPY_ON_SELECT?.trim().toLowerCase();
-    if (raw === "0" || raw === "false" || raw === "off") {
-      return false;
-    }
-    if (raw === "1" || raw === "true" || raw === "on") {
-      return true;
-    }
-    return true;
   }
 
   private getNativeSelectionHint(): string {
@@ -579,93 +494,18 @@ class TypeScriptTui {
   }
 
   private onRawInput(chunk: string): void {
-    this.rawInputBuffer += chunk;
-    this.processRawInputBuffer();
-  }
-
-  private processRawInputBuffer(): void {
-    while (this.rawInputBuffer.length > 0) {
-      const sequence = this.readNextControlSequence();
-      if (sequence === null) {
-        return;
-      }
-      if (sequence !== undefined) {
-        this.rawInputBuffer = this.rawInputBuffer.slice(sequence.length);
-        this.handleRawControlSequence(sequence);
-        continue;
-      }
-
-      const nextEsc = this.rawInputBuffer.indexOf("\x1b");
-      const plainText = nextEsc === -1
-        ? this.rawInputBuffer
-        : this.rawInputBuffer.slice(0, nextEsc);
-      if (!plainText) {
-        return;
-      }
-      this.rawInputBuffer = this.rawInputBuffer.slice(plainText.length);
-      this.flushKeyboardInput(plainText);
-    }
-  }
-
-  private readNextControlSequence(): string | null | undefined {
-    const input = this.rawInputBuffer;
-    if (!input) {
-      return undefined;
-    }
-
-    if (input.startsWith("\x1b[<")) {
-      const mouseEnd = input.match(/^\x1b\[<\d+;\d+;\d+[Mm]/);
-      if (mouseEnd) {
-        return mouseEnd[0];
-      }
-      if (SGR_MOUSE_PREFIX_RE.test(input)) {
-        return null;
+    this.rawInputParser.push(chunk);
+    for (const token of this.rawInputParser.drain()) {
+      if (token.kind === "control") {
+        this.handleRawControlSequence(token.value);
+      } else {
+        this.flushKeyboardInput(token.value);
       }
     }
-
-    if (input.startsWith("\x1b[M")) {
-      if (input.length >= 6) {
-        return input.slice(0, 6);
-      }
-      return null;
-    }
-
-    const exactSequences = [
-      ...CTRL_J_SEQUENCES,
-      ...CTRL_K_SEQUENCES,
-      ...CTRL_O_SEQUENCES,
-      "\x03",
-      "\x1b[99;5u",
-      "\x1b[99;6u",
-      "\x1b[27;5;99~",
-      "\x1b[27;6;99~",
-      "\x1b",
-      "\x1b[27u",
-      "\x1b[27;1u",
-      "\x1b[27~",
-      "\x1b[13;2u",
-      "\x1b[13;2~",
-      "\x1b[27;2;13~",
-      "\x1b[27;13;2~",
-    ];
-    for (const seq of exactSequences) {
-      if (input.startsWith(seq)) {
-        return seq;
-      }
-    }
-
-    if (input[0] === "\x1b") {
-      const maybePrefix = exactSequences.some((seq) => seq.startsWith(input));
-      if (maybePrefix) {
-        return null;
-      }
-    }
-
-    return undefined;
   }
 
   private handleRawControlSequence(chunk: string): void {
-    if (this.nativeSelectionMode && !this.looksLikeMouseSequence(chunk)) {
+    if (this.nativeSelectionMode && !looksLikeMouseSequence(chunk)) {
       this.leaveNativeSelectionMode();
     }
     if (!this.showSessionPicker && !this.questionMode) {
@@ -871,34 +711,10 @@ class TypeScriptTui {
   /** 复制选区到系统剪贴板 */
   private copySelectionToClipboard(): void {
     if (!this.selectedText) return;
-    this.copySelectionToNativeClipboard(this.selectedText);
+    copyTextToNativeClipboard(this.selectedText);
     // 使用 OSC 52 剪贴板协议
     const base64 = Buffer.from(this.selectedText).toString("base64");
     process.stdout.write(`\x1b]52;c;${base64}\x07`);
-  }
-
-  private copySelectionToNativeClipboard(text: string): void {
-    if (process.env.SSH_CONNECTION) {
-      return;
-    }
-    if (process.platform === "darwin") {
-      const child = execFile("pbcopy", (error) => {
-        void error;
-      });
-      child.stdin?.end(text);
-      return;
-    }
-    if (process.platform === "win32") {
-      const child = execFile("clip", (error) => {
-        void error;
-      });
-      child.stdin?.end(text);
-      return;
-    }
-  }
-
-  private looksLikeMouseSequence(chunk: string): boolean {
-    return SGR_MOUSE_RE.test(chunk) || (chunk.length >= 3 && chunk.startsWith("\x1b[M"));
   }
 
   private enterNativeSelectionMode(): void {
@@ -955,40 +771,6 @@ class TypeScriptTui {
     this.clearSelection();
     this.render();
     return true;
-  }
-
-  private isShiftEnterSequence(chunk: string): boolean {
-    return chunk === "\x1b[13;2u"
-      || chunk === "\x1b[13;2~"
-      || chunk === "\x1b[27;2;13~"
-      || chunk === "\x1b[27;13;2~";
-  }
-
-  private isCtrlCSequence(chunk: string): boolean {
-    return chunk === "\x03"
-      || chunk === "\x1b[99;5u"
-      || chunk === "\x1b[99;6u"
-      || chunk === "\x1b[27;5;99~"
-      || chunk === "\x1b[27;6;99~";
-  }
-
-  private isCtrlJSequence(chunk: string): boolean {
-    return CTRL_J_SEQUENCES.has(chunk);
-  }
-
-  private isCtrlKSequence(chunk: string): boolean {
-    return CTRL_K_SEQUENCES.has(chunk);
-  }
-
-  private isCtrlOSequence(chunk: string): boolean {
-    return CTRL_O_SEQUENCES.has(chunk);
-  }
-
-  private isEscapeSequence(chunk: string): boolean {
-    return chunk === "\x1b"
-      || chunk === "\x1b[27u"
-      || chunk === "\x1b[27;1u"
-      || chunk === "\x1b[27~";
   }
 
   private handleEscape(): void {
