@@ -123,12 +123,10 @@ class TypeScriptTui {
   private exiting = false;
   private lastFrame = "";
   private scrollOffset = 0;
-  private rawInputBuffer = "";
   private readonly keyInput = new PassThrough();
   private nextMessageId = 1;
   private nextToolId = 1;
   private selectedToolId: number | null = null;
-  private mouseCaptureEnabled = true;
   private followLatestTool = true;
 
   // ── Resume / session picker state ──────────────────────────
@@ -233,7 +231,7 @@ class TypeScriptTui {
     process.stdin.setEncoding("utf8");
     this.keyInput.setEncoding("utf8");
     this.keyInput.on("keypress", (_str, key) => this.onKeypress(key));
-    process.stdin.on("data", (chunk: string | Buffer) => this.onRawInput(String(chunk)));
+    process.stdin.on("data", (chunk: string | Buffer) => this.flushKeyboardInput(String(chunk)));
   }
 
   private onKeypress(key: readline.Key): void {
@@ -352,45 +350,6 @@ class TypeScriptTui {
     if (typeof key.sequence === "string" && key.sequence >= " ") {
       this.insertText(key.sequence);
       return;
-    }
-  }
-
-  private onRawInput(chunk: string): void {
-    this.rawInputBuffer += chunk;
-
-    while (this.rawInputBuffer.length > 0) {
-      const mouseStart = this.rawInputBuffer.indexOf("\x1b[<");
-
-      if (mouseStart === -1) {
-        this.flushKeyboardInput(this.rawInputBuffer);
-        this.rawInputBuffer = "";
-        return;
-      }
-
-      if (mouseStart > 0) {
-        this.flushKeyboardInput(this.rawInputBuffer.slice(0, mouseStart));
-        this.rawInputBuffer = this.rawInputBuffer.slice(mouseStart);
-      }
-
-      const match = this.rawInputBuffer.match(/^\x1b\[<(\d+);(\d+);(\d+)([Mm])/);
-      if (match) {
-        const code = Number.parseInt(match[1] || "", 10);
-        if (!Number.isNaN(code)) {
-          if (code === 64) {
-            this.scrollTranscript(3);
-          } else if (code === 65) {
-            this.scrollTranscript(-3);
-          }
-        }
-        this.rawInputBuffer = this.rawInputBuffer.slice(match[0].length);
-        continue;
-      }
-
-      if (/^\x1b\[<[0-9;]*$/.test(this.rawInputBuffer)) {
-        return;
-      }
-
-      this.rawInputBuffer = this.rawInputBuffer.slice(1);
     }
   }
 
@@ -553,7 +512,7 @@ class TypeScriptTui {
       this.pushHistory({
         kind: "message",
         role: "system",
-        content: "Commands: /help /clear /session /quit\nESC clear input / interrupt agent\nEnter submits\nShift+Enter inserts newline\nCtrl+J/K select tool  Ctrl+O expand tool result\nwheel 直接滚动 transcript\n启动时加 --resume 可选择历史会话恢复",
+        content: "Commands: /help /clear /session /quit\nESC clear input / interrupt agent\nEnter submits\nShift+Enter inserts newline\nCtrl+J/K select tool  Ctrl+O expand tool result\n鼠标可直接选中文本，滚动请使用 PgUp/PgDn\n启动时加 --resume 可选择历史会话恢复",
       });
       this.render();
       return;
@@ -1721,7 +1680,7 @@ class TypeScriptTui {
     const state = this.generating ? "busy" : "idle";
     const queue = this.pendingPrompts.length > 0 ? `  queue ${this.pendingPrompts.length}` : "";
     const scroll = this.scrollOffset > 0 ? `  scroll +${this.scrollOffset}` : "";
-    const text = `Enter submit  Shift+Enter newline  Ctrl+J/K tool  Ctrl+O expand  wheel scroll  ${state}${queue}  ${this.subagentModel}${scroll}`;
+    const text = `Enter submit  Shift+Enter newline  PgUp/PgDn scroll  Ctrl+J/K tool  Ctrl+O expand  text selectable  ${state}${queue}  ${this.subagentModel}${scroll}`;
     return ["", `${COLOR.secondary}${this.truncate(text, width)}${COLOR.reset}`];
   }
 
@@ -1876,11 +1835,6 @@ class TypeScriptTui {
 
   private enterAltScreen(): void {
     process.stdout.write("\x1b[?1049h\x1b[?25l");
-    this.setMouseCapture(this.mouseCaptureEnabled);
-  }
-
-  private setMouseCapture(enabled: boolean): void {
-    process.stdout.write(enabled ? "\x1b[?1000h\x1b[?1006h" : "\x1b[?1006l\x1b[?1000l");
   }
 
   private scrollTranscript(delta: number): void {
@@ -1917,7 +1871,6 @@ class TypeScriptTui {
   }
 
   private shutdown(): void {
-    this.setMouseCapture(false);
     process.stdout.write("\x1b[?25h\x1b[?1049l");
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(false);
