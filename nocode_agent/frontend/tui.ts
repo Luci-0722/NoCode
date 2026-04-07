@@ -71,7 +71,19 @@ type BackendEvent =
   | { type: "cancelled" }
   | { type: "thread_list"; threads: ThreadInfo[] }
   | { type: "resumed"; thread_id: string; model: string; subagent_model: string; cwd: string }
-  | { type: "history"; messages: Array<{ role: string; content: string }> };
+  | {
+      type: "history";
+      messages: Array<
+        | { role: string; content: string }
+        | {
+            kind: "tool";
+            name: string;
+            args?: Record<string, unknown>;
+            output?: string;
+            tool_call_id?: string;
+          }
+      >;
+    };
 
 const COLOR = {
   reset: "\x1b[0m",
@@ -93,8 +105,9 @@ const COLOR = {
   md: {
     heading: "\x1b[38;2;95;215;175m",
     headingBold: "\x1b[38;2;95;215;175m",
-    code: "\x1b[38;2;255;180;108m",
-    codeBg: "\x1b[48;2;40;44;52m",
+    // 代码样式改为无深色底，避免出现“黑底黄字”。
+    code: "\x1b[38;2;186;198;207m",
+    codeBg: "",
     strong: "\x1b[48;2;244;248;255m\x1b[38;2;49;110;201m",
     link: "\x1b[38;2;104;179;215m\x1b[4m",
     blockquote: "\x1b[38;2;139;153;166m",
@@ -274,12 +287,6 @@ class TypeScriptTui {
 
     // ── Normal input mode ─────────────────────────────────
     if ((key.ctrl && key.name === "c") || (key.meta && key.name === "c")) {
-      if (this.hasSelection()) {
-        this.copySelectionToClipboard();
-        this.clearSelection();
-        this.render();
-        return;
-      }
       this.exiting = true;
       this.shutdown();
       process.exit(0);
@@ -368,41 +375,8 @@ class TypeScriptTui {
   }
 
   private onRawInput(chunk: string): void {
-    this.rawInputBuffer += chunk;
-
-    while (this.rawInputBuffer.length > 0) {
-      const mouseStart = this.rawInputBuffer.indexOf("\x1b[<");
-
-      if (mouseStart === -1) {
-        this.flushKeyboardInput(this.rawInputBuffer);
-        this.rawInputBuffer = "";
-        return;
-      }
-
-      if (mouseStart > 0) {
-        this.flushKeyboardInput(this.rawInputBuffer.slice(0, mouseStart));
-        this.rawInputBuffer = this.rawInputBuffer.slice(mouseStart);
-      }
-
-      const match = this.rawInputBuffer.match(/^\x1b\[<(\d+);(\d+);(\d+)([Mm])/);
-      if (match) {
-        const code = Number.parseInt(match[1] || "", 10);
-        const col = Number.parseInt(match[2] || "", 10);
-        const row = Number.parseInt(match[3] || "", 10);
-        const kind = match[4] || "M";
-        if (!Number.isNaN(code) && !Number.isNaN(col) && !Number.isNaN(row)) {
-          this.handleMouseEvent(code, col, row, kind);
-        }
-        this.rawInputBuffer = this.rawInputBuffer.slice(match[0].length);
-        continue;
-      }
-
-      if (/^\x1b\[<[0-9;]*$/.test(this.rawInputBuffer)) {
-        return;
-      }
-
-      this.rawInputBuffer = this.rawInputBuffer.slice(1);
-    }
+    // 保留原始键盘输入，不再拦截鼠标事件，交给终端原生选区与复制处理。
+    this.flushKeyboardInput(chunk);
   }
 
   private handleMouseEvent(code: number, col: number, row: number, kind: string): void {
@@ -419,47 +393,9 @@ class TypeScriptTui {
       return;
     }
 
-    const point = this.translateMouseToSelectionPoint(col, row);
-    if (!point) {
-      if (kind === "m") {
-        this.draggingSelection = false;
-      }
-      return;
-    }
-
-    const baseCode = code & 0b111111;
-    const isDrag = (code & 32) !== 0;
-    const isLeftButton = baseCode === 0 || (isDrag && (baseCode - 32) === 0);
-    const isRightButton = baseCode === 2 || (isDrag && (baseCode - 32) === 2);
-
-    if (kind === "M" && isLeftButton && !isDrag) {
-      this.selectionAnchor = point;
-      this.selectionFocus = point;
-      this.draggingSelection = true;
-      this.render();
-      return;
-    }
-
-    if (kind === "M" && isRightButton && !isDrag) {
-      // 右键点击复制选中的内容
-      if (this.hasSelection()) {
-        this.copySelectionToClipboard();
-        this.render();
-      }
-      return;
-    }
-
-    if (kind === "M" && isDrag && this.draggingSelection) {
-      this.selectionFocus = point;
-      this.render();
-      return;
-    }
-
-    if (kind === "m" && this.draggingSelection) {
-      this.selectionFocus = point;
-      this.draggingSelection = false;
-      this.render();
-    }
+    void col;
+    void row;
+    void kind;
   }
 
   private flushKeyboardInput(text: string): void {
@@ -562,8 +498,18 @@ class TypeScriptTui {
         break;
       case "history":
         for (const msg of event.messages) {
-          if (msg.role === "user" || msg.role === "assistant" || msg.role === "system") {
+          if ("role" in msg && (msg.role === "user" || msg.role === "assistant" || msg.role === "system")) {
             this.pushHistory({ kind: "message", role: msg.role as Role, content: msg.content });
+          } else if ("kind" in msg && msg.kind === "tool") {
+            this.pushHistory({
+              kind: "tool",
+              name: msg.name,
+              args: msg.args,
+              output: msg.output ?? "",
+              status: "done",
+              expanded: false,
+              toolCallId: msg.tool_call_id,
+            });
           }
         }
         break;
@@ -623,6 +569,7 @@ class TypeScriptTui {
         kind: "message",
         role: "system",
         content: "Commands: /help /clear /session /quit\nESC clear input / interrupt agent\nEnter submits\nShift+Enter inserts newline\nwheel/PgUp/PgDn 滚动  drag 选择文本  Ctrl+C 复制选区\nCtrl+J/K select tool  Ctrl+O expand tool result\n启动时加 --resume 可选择历史会话恢复",
+        content: "Commands: /help /clear /session /quit\nESC clear input / interrupt agent\nEnter submits\nShift+Enter inserts newline\nwheel/PgUp/PgDn 滚动\nCtrl+J/K select tool  Ctrl+O expand tool result\n启动时加 --resume 可选择历史会话恢复",
       });
       this.render();
       return;
@@ -1272,7 +1219,7 @@ class TypeScriptTui {
     this.lastTranscriptVisiblePlain = visible.map((line) => this.stripAnsi(line));
     this.lastTranscriptScreenStartRow = headerHeight + 1;
     const lines: string[] = [];
-    lines.push(...this.applySelectionToVisibleTranscript(visible, start));
+    lines.push(...visible);
     while (lines.length < height) {
       lines.push("");
     }
@@ -1794,7 +1741,7 @@ class TypeScriptTui {
     const state = this.generating ? "busy" : "idle";
     const queue = this.pendingPrompts.length > 0 ? `  queue ${this.pendingPrompts.length}` : "";
     const scroll = this.scrollOffset > 0 ? `  scroll +${this.scrollOffset}` : "";
-    const text = `Enter submit  Shift+Enter newline  wheel/PgUp/PgDn scroll  drag select  Ctrl+C copy selection  Ctrl+J/K tool  ${state}${queue}  ${this.subagentModel}${scroll}`;
+    const text = `Enter submit  Shift+Enter newline  wheel/PgUp/PgDn scroll  Ctrl+J/K tool  ${state}${queue}  ${this.subagentModel}${scroll}`;
     return ["", `${COLOR.secondary}${this.truncate(text, width)}${COLOR.reset}`];
   }
 
@@ -2133,15 +2080,9 @@ class TypeScriptTui {
       : this.visibleLength(wrappedBeforeCursor[wrappedBeforeCursor.length - 1]);
     const promptPrefix = cursorLine === 0 ? 2 : 2;
     
-    // 修复光标位置：如果光标在行尾，应该显示在文本后面而不是文本上
-    let finalCursorCol = cursorColBase;
-    if (this.cursorCol === currentLine.length) {
-      // 光标在行尾，显示在文本后面
-      finalCursorCol += 1;
-    }
-    
     const row = promptStartRow + visualRowOffset + cursorLine;
-    const col = promptPrefix + finalCursorCol;
+    // 光标直接定位到文本宽度后的列，避免行尾额外偏移导致“浮在上一条线”。
+    const col = promptPrefix + cursorColBase;
     process.stdout.write(`\x1b[${row};${Math.max(1, col)}H`);
   }
 

@@ -150,11 +150,12 @@ def list_threads(
         db.close()
 
 
-def load_thread_messages(db_path: str, thread_id: str) -> list[dict[str, str]]:
-    """Load human/ai messages from a thread's checkpoint state.
+def load_thread_messages(db_path: str, thread_id: str) -> list[dict[str, Any]]:
+    """Load thread history from checkpoint state.
 
-    Returns a list of dicts with keys: role, content.
-    Filters out tool messages and system metadata.
+    Returns a normalized event list for TUI replay:
+    - text message: {"role": "...", "content": "..."}
+    - tool record: {"kind": "tool", "name": "...", "args": {...}, "output": "...", "tool_call_id": "..."}
     """
     import sqlite3 as _sqlite3
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -174,10 +175,9 @@ def load_thread_messages(db_path: str, thread_id: str) -> list[dict[str, str]]:
         cv = state.get("channel_values", {})
         msgs = cv.get("messages", [])
 
-        results: list[dict[str, str]] = []
+        results: list[dict[str, Any]] = []
+        tool_index_by_call_id: dict[str, int] = {}
         for m in msgs:
-            if isinstance(m, ToolMessage):
-                continue
             if isinstance(m, HumanMessage):
                 content = m.content if isinstance(m.content, str) else str(m.content)
                 results.append({"role": "user", "content": content})
@@ -187,11 +187,49 @@ def load_thread_messages(db_path: str, thread_id: str) -> list[dict[str, str]]:
                 if not content:
                     content = m.content if isinstance(m.content, str) else str(m.content)
                 if not content.strip():
-                    continue
-                results.append({"role": "assistant", "content": content})
+                    content = ""
+                if content:
+                    results.append({"role": "assistant", "content": content})
+
+                # AIMessage 上会附带 tool_calls，恢复为工具记录。
+                tool_calls = getattr(m, "tool_calls", None) or []
+                for call in tool_calls:
+                    call_id = str(call.get("id", "") or "")
+                    name = str(call.get("name", "") or "")
+                    args = call.get("args", {})
+                    results.append(
+                        {
+                            "kind": "tool",
+                            "name": name,
+                            "args": args if isinstance(args, dict) else {},
+                            "output": "",
+                            "tool_call_id": call_id,
+                        }
+                    )
+                    if call_id:
+                        tool_index_by_call_id[call_id] = len(results) - 1
             elif isinstance(m, SystemMessage):
                 content = m.content if isinstance(m.content, str) else str(m.content)
                 results.append({"role": "system", "content": content})
+            elif isinstance(m, ToolMessage):
+                content = m.content if isinstance(m.content, str) else str(m.content)
+                tool_call_id = str(getattr(m, "tool_call_id", "") or "")
+                name = str(getattr(m, "name", "") or "")
+                idx = tool_index_by_call_id.get(tool_call_id)
+                if idx is not None:
+                    results[idx]["output"] = content
+                    if name and not results[idx].get("name"):
+                        results[idx]["name"] = name
+                else:
+                    results.append(
+                        {
+                            "kind": "tool",
+                            "name": name,
+                            "args": {},
+                            "output": content,
+                            "tool_call_id": tool_call_id,
+                        }
+                    )
         return results
     finally:
         db.close()
