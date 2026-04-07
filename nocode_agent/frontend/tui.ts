@@ -366,8 +366,22 @@ class TypeScriptTui {
   }
 
   private onRawInput(chunk: string): void {
+    if (this.isShiftEnterSequence(chunk)) {
+      if (!this.showSessionPicker && !this.questionMode) {
+        this.insertNewline();
+      }
+      return;
+    }
+
     // 保留原始键盘输入，不再拦截鼠标事件，交给终端原生选区与复制处理。
     this.flushKeyboardInput(chunk);
+  }
+
+  private isShiftEnterSequence(chunk: string): boolean {
+    return chunk === "\x1b[13;2u"
+      || chunk === "\x1b[13;2~"
+      || chunk === "\x1b[27;2;13~"
+      || chunk === "\x1b[27;13;2~";
   }
 
   private flushKeyboardInput(text: string): void {
