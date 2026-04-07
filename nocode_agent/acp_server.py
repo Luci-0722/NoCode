@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 from threading import Lock
 from typing import Any
@@ -37,6 +38,9 @@ from acp.schema import (
 
 from nocode_agent.agent import MainAgent, create_mainagent
 from nocode_agent.config import load_config
+from nocode_agent.log import setup_logging
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_acp_sessions_path(config: dict[str, Any]) -> str:
@@ -219,11 +223,13 @@ class NoCodeAgent(Agent):
         self._pool = ACPAgentPool(config, self._session_store)
         self._conn = None
         self._active_prompts: dict[str, asyncio.Task[None]] = {}
+        logger.info("NoCodeAgent initialized, sessions path: %s", self._session_store._path)
 
     def on_connect(self, conn) -> None:
         self._conn = conn
 
     async def initialize(self, protocol_version: int, client_capabilities=None, client_info=None, **kwargs) -> InitializeResponse:
+        logger.info("ACP initialize: protocol_version=%d", protocol_version)
         return InitializeResponse(
             protocol_version=min(protocol_version, PROTOCOL_VERSION),
             agent_capabilities=AgentCapabilities(loadSession=True),
@@ -236,6 +242,7 @@ class NoCodeAgent(Agent):
 
     async def new_session(self, cwd: str | None = None, mcp_servers=None) -> NewSessionResponse:
         session_id = f"session-{os.urandom(8).hex()}"
+        logger.info("New session created: %s", session_id)
         self._session_store.set(
             session_id,
             {
@@ -311,6 +318,8 @@ class NoCodeAgent(Agent):
         if current is not None:
             self._active_prompts[session_id] = current
 
+        logger.debug("Prompt started: session=%s, text=%s", session_id, text[:200])
+
         try:
             async for event_type, *data in agent.chat(text):
                 if event_type == "text":
@@ -353,6 +362,7 @@ class NoCodeAgent(Agent):
                         ),
                     )
         except asyncio.CancelledError:
+            logger.info("Prompt cancelled: session=%s", session_id)
             raise
         finally:
             active = self._active_prompts.get(session_id)
@@ -396,6 +406,7 @@ class NoCodeAgent(Agent):
         return ResumeSessionResponse()
 
     async def close_session(self, session_id: str, **kwargs) -> CloseSessionResponse | None:
+        logger.info("Closing session: %s", session_id)
         self._session_store.delete(session_id)
         self._pool.drop(session_id)
         self._active_prompts.pop(session_id, None)
@@ -424,7 +435,9 @@ class NoCodeAgent(Agent):
 
 async def main_async() -> int:
     args = _parse_args()
+    setup_logging()
     config = _build_runtime_config(args.config, args)
+    logger.info("Starting NoCode ACP server (model=%s)", config.get("model", "glm-4-flash"))
     await run_agent(NoCodeAgent(config))
     return 0
 

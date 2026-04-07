@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from pathlib import Path
 from uuid import uuid4
 from typing import Any
 
@@ -11,11 +13,29 @@ from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langchain_openai import ChatOpenAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-from nocode_agent.compression import CompressionMiddleware, CompressionStrategy
+from nocode_agent.compression import (
+    AutoCompactor,
+    CompressionConfig,
+    FileReadTracker,
+    MicrocompactMiddleware,
+    SessionMemoryExtractor,
+    build_auto_compact_config,
+    build_session_memory_config,
+)
 from nocode_agent.persistence import CheckpointerManager, resolve_checkpoint_path
-from nocode_agent.prompts import build_main_system_prompt, build_subagent_system_prompt
-from nocode_agent.skill_tools import load_skill, search_skills
-from nocode_agent.tools import build_core_tools, make_subagent_tool
+from nocode_agent.prompts import (
+    build_main_system_prompt,
+    build_subagent_system_prompt,
+    build_explore_subagent_prompt,
+    build_plan_subagent_prompt,
+    build_verification_subagent_prompt,
+)
+from nocode_agent.skills.registry import init_skill_registry
+from nocode_agent.skills.tool import invoke_skill
+from nocode_agent.subagents import get_builtin_agents, build_readonly_tool_names
+from nocode_agent.tools import build_core_tools, build_readonly_tools, make_agent_tool
+
+logger = logging.getLogger(__name__)
 
 
 def _render_tool_output(content) -> str:
@@ -53,12 +73,18 @@ class MainAgent:
         thread_id: str | None = None,
         model_name: str = "",
         subagent_model_name: str = "",
+        auto_compactor: AutoCompactor | None = None,
+        file_read_tracker: FileReadTracker | None = None,
+        sm_extractor: SessionMemoryExtractor | None = None,
     ):
         self._agent = agent
         self._checkpointer = checkpointer
         self._thread_id = thread_id or self._new_thread_id()
         self._model_name = model_name
         self._subagent_model_name = subagent_model_name
+        self._auto_compactor = auto_compactor
+        self._file_tracker = file_read_tracker or FileReadTracker()
+        self._sm_extractor = sm_extractor
 
     @staticmethod
     def _new_thread_id() -> str:
@@ -81,6 +107,7 @@ class MainAgent:
 
     async def chat(self, user_input: str):
         """异步生成器，yield (event_type, *data)。"""
+        logger.debug("chat() called: thread=%s, input=%s", self._thread_id[:20], user_input[:200])
         await self._checkpointer.ensure_setup()
         config = {"configurable": {"thread_id": self._thread_id}}
 
@@ -114,6 +141,9 @@ class MainAgent:
                     for message in new_messages:
                         if isinstance(message, AIMessage):
                             for tool_call in message.tool_calls:
+                                # 通知 SM extractor 有工具调用
+                                if self._sm_extractor:
+                                    self._sm_extractor.notify_tool_call()
                                 yield (
                                     "tool_start",
                                     tool_call["name"],
@@ -123,6 +153,10 @@ class MainAgent:
                 elif step == "tools":
                     for message in new_messages:
                         if isinstance(message, ToolMessage):
+                            # 追踪 read 工具的文件读取
+                            if message.name == "read" and self._file_tracker:
+                                self._file_tracker.record_from_tool_message(message)
+
                             yield (
                                 "tool_end",
                                 message.name or "tool",
@@ -130,22 +164,108 @@ class MainAgent:
                                 getattr(message, "tool_call_id", ""),
                             )
 
+                # ── Auto-Compact + SM 提取（每轮结束后） ──────────
+                if step == "model":
+                    if self._auto_compactor:
+                        compacted = await self._maybe_auto_compact(config)
+                        if compacted:
+                            yield compacted
 
-def _build_middleware(compression: dict | None):
+                    # Session Memory 提取（fire-and-forget）
+                    if self._sm_extractor:
+                        state = await self._agent.aget_state(config)
+                        msgs = state.values.get("messages", [])
+                        await self._sm_extractor.maybe_extract(msgs)
+
+    async def _maybe_auto_compact(self, config: dict) -> tuple | None:
+        """检查并执行 auto-compact（如果需要）。返回事件元组或 None。"""
+        try:
+            # 从 checkpointer 读取当前消息
+            state = await self._agent.aget_state(config)
+            messages = state.values.get("messages", [])
+
+            if not self._auto_compactor.should_trigger(messages):
+                return None
+
+            logger.info("Auto-compact triggered, generating summary...")
+            result = await self._auto_compactor.compact(messages)
+
+            if result is None:
+                logger.warning("Auto-compact failed, will retry next turn")
+                return None
+
+            logger.info(
+                "Auto-compact completed: %d → %d tokens (%d files restored)",
+                result.pre_tokens,
+                result.post_tokens,
+                result.files_restored,
+            )
+
+            # 用压缩后的消息替换当前状态
+            await self._agent.aupdate_state(
+                config,
+                {"messages": result.messages},
+                as_node="model",
+            )
+
+            return ("compact", result.pre_tokens, result.post_tokens)
+
+        except Exception as e:
+            logger.error("Auto-compact error: %s", e)
+            return None
+
+
+# 已知模型的上下文窗口大小
+# 匹配规则: model_name 包含 key 即命中（小写比较）
+_CONTEXT_WINDOWS: dict[str, int] = {
+    # ── 智谱 GLM 系列 ─────────────────────────────
+    "glm-4-long": 1_000_000,
+    "glm-4v": 8_000,
+    "glm-4v-plus": 8_000,
+    "glm-4": 128_000,
+    # ── Anthropic Claude 系列 ──────────────────────
+    "claude-opus-4": 200_000,
+    "claude-sonnet-4": 200_000,
+    "claude-3-7-sonnet": 200_000,
+    "claude-3-5-sonnet": 200_000,
+    "claude-3-5-haiku": 200_000,
+    "claude-3-opus": 200_000,
+    "claude-3-sonnet": 200_000,
+    "claude-3-haiku": 200_000,
+    # ── OpenAI 系列 ───────────────────────────────
+    "gpt-4.5": 128_000,
+    "gpt-4o": 128_000,
+    "gpt-4-turbo": 128_000,
+    "gpt-4-32k": 32_768,
+    "gpt-4": 8_192,
+    "gpt-3.5": 16_385,
+    "o3-mini": 200_000,
+    "o3": 200_000,
+    "o4-mini": 200_000,
+    "o1-mini": 128_000,
+    "o1-preview": 128_000,
+    "o1": 200_000,
+}
+
+
+def _resolve_context_window(model: str) -> int:
+    """根据模型名称解析上下文窗口大小。
+
+    使用子串匹配，按 key 长度降序优先（避免 "gpt-4" 先于 "gpt-4-32k" 命中）。
+    """
+    model_lower = model.lower()
+    for key in sorted(_CONTEXT_WINDOWS, key=len, reverse=True):
+        if key in model_lower:
+            return _CONTEXT_WINDOWS[key]
+    return 128_000  # 默认值
+
+
+def _build_middleware(compression: dict | None, context_window: int = 128_000):
     if not compression:
         return []
 
-    strategy = CompressionStrategy(
-        trigger_tokens=compression.get("trigger_tokens", 8000),
-        keep_recent=compression.get("keep_recent", 10),
-        compressible_tools=tuple(
-            compression.get(
-                "compressible_tools",
-                ("read", "write", "edit", "glob", "grep", "bash", "delegate_code"),
-            )
-        ),
-    )
-    return [CompressionMiddleware(strategy).as_langchain_middleware()]
+    config = CompressionConfig.from_yaml(compression, context_window=context_window)
+    return [MicrocompactMiddleware(config).as_langchain_middleware()]
 
 
 def _build_model(
@@ -249,6 +369,8 @@ async def create_mainagent(
     max_tokens: int = 4096,
     temperature: float = 0.7,
     compression: dict | None = None,
+    auto_compact: dict | None = None,
+    session_memory: dict | None = None,
     subagent_model: str | None = None,
     subagent_temperature: float = 0.1,
     thread_id: str | None = None,
@@ -256,7 +378,12 @@ async def create_mainagent(
     mcp_servers: list[Any] | None = None,
 ) -> MainAgent:
     """创建主代理和代码子代理。"""
-    middleware = _build_middleware(compression)
+    logger.info(
+        "Creating MainAgent: model=%s, base_url=%s, max_tokens=%d, temperature=%.2f",
+        model, base_url, max_tokens, temperature,
+    )
+    context_window = _resolve_context_window(model)
+    middleware = _build_middleware(compression, context_window=context_window)
     checkpointer = CheckpointerManager(resolve_checkpoint_path(persistence_config))
     saver = checkpointer.get()
 
@@ -275,22 +402,100 @@ async def create_mainagent(
         max_tokens=max_tokens,
     )
 
+    # ── Session Memory (Layer 2) ──────────────────────────────
+    sm_config = build_session_memory_config(session_memory)
+    sm_extractor = None
+    resolved_thread_id = thread_id or f"mainagent-{uuid4().hex}"
+    if sm_config:
+        sm_llm = _build_model(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            temperature=0.1,
+            max_tokens=4096,
+        )
+        sm_extractor = SessionMemoryExtractor(
+            config=sm_config,
+            llm=sm_llm,
+            thread_id=resolved_thread_id,
+        )
+
+    # ── Auto-Compact (Layer 3) ────────────────────────────────
+    file_tracker = FileReadTracker()
+    auto_compactor = None
+    ac_config = build_auto_compact_config(auto_compact, context_window=context_window)
+    if ac_config:
+        summary_llm = _build_model(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            temperature=0.1,
+            max_tokens=ac_config.max_summary_tokens,
+        )
+        auto_compactor = AutoCompactor(
+            config=ac_config,
+            context_window=context_window,
+            llm=summary_llm,
+            file_tracker=file_tracker,
+            sm_extractor=sm_extractor,
+        )
+
     core_tools = build_core_tools()
+    readonly_tools = build_readonly_tools()
 
-    # 技能工具始终与本地核心工具一起暴露。
-    skill_tools = [load_skill, search_skills]
+    # Initialize skill system — discover skills from all sources
+    init_skill_registry(Path.cwd())
+    skill_tools = [invoke_skill]
     mcp_tools = await _load_mcp_tools(mcp_servers)
+    logger.info("Loaded %d MCP tools, %d core tools, %d skill tools", len(mcp_tools), len(core_tools), len(skill_tools))
 
-    subagent = create_agent(
+    # ── 创建多类型子代理 ────────────────────────────────────
+    subagent_defs = get_builtin_agents()
+
+    # general-purpose：拥有全部核心工具（可读写）
+    general_purpose_agent = create_agent(
         model=subagent_llm,
         tools=core_tools,
         system_prompt=build_subagent_system_prompt(),
         checkpointer=saver,
         middleware=middleware,
-        name="mainagent_subagent",
+        name="subagent_general_purpose",
     )
 
-    tools = [*core_tools, *skill_tools, *mcp_tools, make_subagent_tool(subagent)]
+    # Explore / Plan / verification：只读工具集
+    explore_agent = create_agent(
+        model=subagent_llm,
+        tools=readonly_tools,
+        system_prompt=build_explore_subagent_prompt(),
+        checkpointer=saver,
+        middleware=middleware,
+        name="subagent_explore",
+    )
+    plan_agent = create_agent(
+        model=subagent_llm,
+        tools=readonly_tools,
+        system_prompt=build_plan_subagent_prompt(),
+        checkpointer=saver,
+        middleware=middleware,
+        name="subagent_plan",
+    )
+    verification_agent = create_agent(
+        model=subagent_llm,
+        tools=readonly_tools,
+        system_prompt=build_verification_subagent_prompt(),
+        checkpointer=saver,
+        middleware=middleware,
+        name="subagent_verification",
+    )
+
+    subagents_map = {
+        "general-purpose": general_purpose_agent,
+        "Explore": explore_agent,
+        "Plan": plan_agent,
+        "verification": verification_agent,
+    }
+
+    tools = [*core_tools, *skill_tools, *mcp_tools, make_agent_tool(subagents_map)]
     agent = create_agent(
         model=main_llm,
         tools=tools,
@@ -300,10 +505,15 @@ async def create_mainagent(
         name="mainagent_supervisor",
     )
 
+    logger.info("MainAgent created: thread_id=%s, context_window=%d", resolved_thread_id, context_window)
+
     return MainAgent(
         agent=agent,
         checkpointer=checkpointer,
-        thread_id=thread_id,
+        thread_id=resolved_thread_id,
         model_name=model,
         subagent_model_name=subagent_model or model,
+        auto_compactor=auto_compactor,
+        file_read_tracker=file_tracker,
+        sm_extractor=sm_extractor,
     )

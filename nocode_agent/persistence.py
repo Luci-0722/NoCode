@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 import aiosqlite
+
+logger = logging.getLogger(__name__)
 
 
 def _import_sqlite_saver():
@@ -51,8 +54,10 @@ class CheckpointerManager:
                 return
             await saver.setup()
             self._setup_done = True
+            logger.info("Checkpointer setup complete: %s", self._db_path)
 
     async def delete_thread(self, thread_id: str) -> None:
+        logger.info("Deleting thread: %s", thread_id)
         saver = self.get()
         await self.ensure_setup()
         delete_thread = getattr(saver, "adelete_thread", None)
@@ -68,3 +73,78 @@ def resolve_checkpoint_path(config: dict[str, Any] | None = None) -> str:
     if not resolved:
         resolved = "nocode_agent/.state/langgraph-checkpoints.sqlite"
     return str(Path(resolved).expanduser())
+
+
+def list_threads(
+    db_path: str,
+    limit: int = 50,
+    source: str | None = None,
+) -> list[dict[str, Any]]:
+    """List threads from the checkpoint DB with metadata.
+
+    Returns a list of dicts with keys: thread_id, preview, message_count, source.
+    Ordered by most recent first.
+    Filter by source ("tui" or "multiagent") if provided.
+    """
+    import sqlite3 as _sqlite3
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    db_path = str(Path(db_path).expanduser())
+    if not Path(db_path).exists():
+        return []
+
+    db = _sqlite3.connect(db_path)
+    try:
+        saver = SqliteSaver(db)
+        saver.setup()
+
+        rows = db.execute(
+            "SELECT DISTINCT thread_id FROM checkpoints "
+            'WHERE checkpoint_ns = "" ORDER BY rowid DESC LIMIT ?',
+            (limit,),
+        ).fetchall()
+        if not rows:
+            return []
+
+        results: list[dict[str, Any]] = []
+        for (thread_id,) in rows:
+            try:
+                state = saver.get({"configurable": {"thread_id": thread_id}})
+                if not state:
+                    continue
+                cv = state.get("channel_values", {})
+                msgs = cv.get("messages", [])
+
+                # Find first user message for preview
+                preview = ""
+                for m in msgs:
+                    if getattr(m, "type", "") == "human":
+                        content = getattr(m, "content", "")
+                        preview = content[:80] if isinstance(content, str) else str(content)[:80]
+                        break
+
+                # Classify: multiagent threads start with ACP orchestration prefix
+                thread_source = (
+                    "multiagent"
+                    if preview.startswith("\u4f60\u6b63\u5728\u7531\u4e00\u4e2a ACP \u7f16\u6392\u5c42\u8c03\u5ea6\u8fd0\u884c")
+                    else "tui"
+                )
+                results.append({
+                    "thread_id": thread_id,
+                    "preview": preview or "(empty)",
+                    "message_count": len(msgs),
+                    "source": thread_source,
+                })
+            except Exception:
+                results.append({
+                    "thread_id": thread_id,
+                    "preview": "(error)",
+                    "message_count": 0,
+                    "source": "unknown",
+                })
+
+        if source is not None:
+            results = [r for r in results if r["source"] == source]
+        return results
+    finally:
+        db.close()

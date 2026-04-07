@@ -28,6 +28,29 @@ type PendingPrompt = {
   text: string;
 };
 
+type ThreadInfo = {
+  thread_id: string;
+  preview: string;
+  message_count: number;
+};
+
+type QuestionOption = {
+  label: string;
+  description: string;
+};
+
+type Question = {
+  question: string;
+  header?: string;
+  options?: QuestionOption[];
+  multiSelect?: boolean;
+};
+
+type QuestionAnswer = {
+  question_index: number;
+  selected: string[];
+};
+
 type BackendEvent =
   | { type: "hello"; thread_id: string; model: string; subagent_model: string; cwd: string }
   | { type: "status"; thread_id: string; model: string; subagent_model: string; cwd: string }
@@ -35,20 +58,39 @@ type BackendEvent =
   | { type: "text"; delta: string }
   | { type: "tool_start"; name: string; args?: Record<string, unknown> }
   | { type: "tool_end"; name: string; output?: string }
+  | { type: "question"; questions: Question[]; tool_call_id: string }
   | { type: "done" }
   | { type: "error"; message: string }
-  | { type: "fatal"; message: string };
+  | { type: "fatal"; message: string }
+  | { type: "cancelled" }
+  | { type: "thread_list"; threads: ThreadInfo[] }
+  | { type: "resumed"; thread_id: string; model: string; subagent_model: string; cwd: string };
 
 const COLOR = {
   reset: "\x1b[0m",
   bold: "\x1b[1m",
   dim: "\x1b[2m",
+  italic: "\x1b[3m",
+  underline: "\x1b[4m",
+  strikethrough: "\x1b[9m",
   soft: "\x1b[38;2;186;198;207m",
   accent: "\x1b[38;2;95;215;175m",
   secondary: "\x1b[38;2;138;153;166m",
   warning: "\x1b[38;2;244;211;94m",
   danger: "\x1b[38;2;255;107;107m",
   user: "\x1b[38;2;126;217;87m",
+  md: {
+    heading: "\x1b[38;2;95;215;175m",
+    headingBold: "\x1b[38;2;95;215;175m\x1b[1m",
+    code: "\x1b[38;2;255;180;108m",
+    codeBg: "\x1b[48;2;40;44;52m",
+    link: "\x1b[38;2;104;179;215m\x1b[4m",
+    blockquote: "\x1b[38;2;139;153;166m",
+    hr: "\x1b[38;2;80;80;80m",
+    listBullet: "\x1b[38;2;95;215;175m",
+    tableBorder: "\x1b[38;2;80;90;100m",
+    tableHeader: "\x1b[38;2;186;198;207m\x1b[1m",
+  },
 };
 
 class TypeScriptTui {
@@ -76,6 +118,28 @@ class TypeScriptTui {
   private nextToolId = 1;
   private selectedToolId: number | null = null;
   private mouseCaptureEnabled = true;
+
+  // ── Resume / session picker state ──────────────────────────
+  private readonly resumeMode: boolean;
+  private showSessionPicker = false;
+  private sessionThreads: ThreadInfo[] = [];
+  private sessionPickerIndex = 0;
+  private sessionPickerScroll = 0;
+
+  // ── Question mode state ───────────────────────────────────
+  private questionMode = false;
+  private activeQuestions: Question[] = [];
+  private questionToolCallId = "";
+  private currentQuestionIndex = 0;
+  private optionIndex = 0;
+  private multiSelected: Set<number> = new Set();
+  private otherMode = false;
+  private otherText = "";
+  private questionAnswers: QuestionAnswer[] = [];
+
+  constructor() {
+    this.resumeMode = process.argv.includes("--resume");
+  }
 
   async start(): Promise<void> {
     this.enterAltScreen();
@@ -160,6 +224,36 @@ class TypeScriptTui {
   }
 
   private onKeypress(key: readline.Key): void {
+    // ── Session picker mode ───────────────────────────────
+    if (this.showSessionPicker) {
+      if (key.name === "up" || (key.ctrl && key.name === "k")) {
+        this.moveSessionPicker(-1);
+        return;
+      }
+      if (key.name === "down" || (key.ctrl && key.name === "j")) {
+        this.moveSessionPicker(1);
+        return;
+      }
+      if (key.name === "return") {
+        this.confirmSessionPicker();
+        return;
+      }
+      if (key.name === "escape") {
+        this.showSessionPicker = false;
+        this.pushHistory({ role: "system", content: "取消恢复，使用新会话。" });
+        this.render();
+        return;
+      }
+      return; // swallow all other keys while picker is active
+    }
+
+    // ── Question mode ───────────────────────────────────
+    if (this.questionMode) {
+      this.handleQuestionKeypress(key);
+      return;
+    }
+
+    // ── Normal input mode ─────────────────────────────────
     if (key.ctrl && key.name === "c") {
       this.exiting = true;
       this.shutdown();
@@ -201,7 +295,11 @@ class TypeScriptTui {
     }
 
     if (key.name === "escape") {
-      this.clearInput();
+      if (this.inputLines.some((line) => line.length > 0)) {
+        this.clearInput();
+      } else if (this.generating) {
+        this.sendBackend({ type: "cancel" });
+      }
       return;
     }
 
@@ -295,6 +393,15 @@ class TypeScriptTui {
   private handleBackendEvent(event: BackendEvent): void {
     switch (event.type) {
       case "hello":
+        this.threadId = event.thread_id;
+        this.model = event.model;
+        this.subagentModel = event.subagent_model;
+        this.cwd = event.cwd;
+        if (this.resumeMode) {
+          this.showSessionPicker = true;
+          this.sendBackend({ type: "list_threads", source: "tui" });
+        }
+        break;
       case "status":
         this.threadId = event.thread_id;
         this.model = event.model;
@@ -318,8 +425,22 @@ class TypeScriptTui {
         break;
       case "tool_end": {
         this.finishToolRun(event.name, event.output);
+        if (event.name === "ask_user_question" && this.questionMode) {
+          this.questionMode = false;
+        }
         break;
       }
+      case "question":
+        this.questionMode = true;
+        this.activeQuestions = event.questions;
+        this.questionToolCallId = event.tool_call_id || "";
+        this.currentQuestionIndex = 0;
+        this.optionIndex = 0;
+        this.multiSelected = new Set();
+        this.otherMode = false;
+        this.otherText = "";
+        this.questionAnswers = [];
+        break;
       case "done":
         if (this.streaming.trim()) {
           this.pushHistory({ role: "assistant", content: this.streaming });
@@ -333,7 +454,28 @@ class TypeScriptTui {
         this.pushHistory({ role: "system", content: `${event.type}: ${event.message}` });
         this.streaming = "";
         this.generating = false;
-        this.dispatchNextQueuedPrompt();
+        this.pendingPrompts.length = 0;
+        break;
+      case "cancelled":
+        this.pushHistory({ role: "system", content: "⏹ 已中断生成" });
+        this.pendingPrompts.length = 0;
+        break;
+      case "thread_list":
+        this.sessionThreads = event.threads;
+        this.sessionPickerIndex = 0;
+        this.sessionPickerScroll = 0;
+        if (this.sessionThreads.length === 0) {
+          this.showSessionPicker = false;
+          this.pushHistory({ role: "system", content: "没有找到历史会话，将创建新会话。" });
+        }
+        break;
+      case "resumed":
+        this.threadId = event.thread_id;
+        this.model = event.model;
+        this.subagentModel = event.subagent_model;
+        this.cwd = event.cwd;
+        this.showSessionPicker = false;
+        this.pushHistory({ role: "system", content: `已恢复会话 ${event.thread_id.slice(-8)}` });
         break;
     }
     this.render();
@@ -388,7 +530,7 @@ class TypeScriptTui {
     if (command === "/help") {
       this.pushHistory({
         role: "system",
-        content: "Commands: /help /clear /session /quit\nESC clears input\nEnter submits\nShift+Enter inserts newline\nCtrl+J/K select tool  Ctrl+O expand tool result\nCtrl+Y toggle wheel/copy mode",
+        content: "Commands: /help /clear /session /quit\nESC clear input / interrupt agent\nEnter submits\nShift+Enter inserts newline\nCtrl+J/K select tool  Ctrl+O expand tool result\nCtrl+Y toggle wheel/copy mode\n启动时加 --resume 可选择历史会话恢复",
       });
       this.render();
       return;
@@ -497,7 +639,319 @@ class TypeScriptTui {
     this.render();
   }
 
-  private insertText(text: string): void {
+  // ── Session picker helpers ────────────────────────────────
+
+  private moveSessionPicker(delta: number): void {
+    if (this.sessionThreads.length === 0) return;
+    this.sessionPickerIndex = Math.max(
+      0,
+      Math.min(this.sessionThreads.length - 1, this.sessionPickerIndex + delta),
+    );
+    this.render();
+  }
+
+  private confirmSessionPicker(): void {
+    if (this.sessionThreads.length === 0) return;
+    const selected = this.sessionThreads[this.sessionPickerIndex];
+    if (!selected) return;
+    this.sendBackend({ type: "resume_thread", thread_id: selected.thread_id });
+  }
+
+  private renderSessionPicker(width: number, maxHeight: number): string[] {
+    const lines: string[] = [];
+    lines.push("");
+    lines.push(`${COLOR.accent}${COLOR.bold}  📋 恢复历史会话${COLOR.reset}`);
+    lines.push("");
+
+    if (this.sessionThreads.length === 0) {
+      lines.push(`${COLOR.secondary}  加载中...${COLOR.reset}`);
+      while (lines.length < maxHeight) lines.push("");
+      return lines;
+    }
+
+    const idWidth = 12;
+    const previewWidth = Math.max(12, width - idWidth - 14);
+
+    // Reserve 3 lines for header, rest for items
+    const visibleItems = Math.max(1, maxHeight - 3);
+
+    // Clamp scroll so selected item is always visible
+    if (this.sessionPickerIndex < this.sessionPickerScroll) {
+      this.sessionPickerScroll = this.sessionPickerIndex;
+    } else if (this.sessionPickerIndex >= this.sessionPickerScroll + visibleItems) {
+      this.sessionPickerScroll = this.sessionPickerIndex - visibleItems + 1;
+    }
+
+    const end = Math.min(this.sessionThreads.length, this.sessionPickerScroll + visibleItems);
+    for (let i = this.sessionPickerScroll; i < end; i++) {
+      const t = this.sessionThreads[i];
+      const selected = i === this.sessionPickerIndex;
+      const id = this.truncate(t.thread_id.slice(-idWidth), idWidth);
+      const preview = this.truncate(t.preview || "(empty)", previewWidth);
+      const count = `${t.message_count} msgs`;
+
+      if (selected) {
+        // Use reverse video for the entire line — impossible to miss
+        const content = ` > ${id}  ${preview}  ${count}`;
+        const padded = this.padRight(content, width);
+        lines.push(`\x1b[7m${COLOR.bold}${padded}${COLOR.reset}`);
+      } else {
+        const idCol = `${COLOR.secondary}${id}${COLOR.reset}`;
+        const countCol = `${COLOR.dim}${count}${COLOR.reset}`;
+        const previewCol = `${COLOR.soft}${preview}${COLOR.reset}`;
+        lines.push(`   ${idCol}  ${previewCol}  ${countCol}`);
+      }
+    }
+
+    // Show scroll hint if there are more items
+    if (this.sessionThreads.length > visibleItems) {
+      const remaining = this.sessionThreads.length - end;
+      if (remaining > 0) {
+        lines.push(`${COLOR.dim}   ... 还有 ${remaining} 个会话${COLOR.reset}`);
+      }
+    }
+
+    while (lines.length < maxHeight) lines.push("");
+    return lines;
+  }
+
+  // ── Question mode ─────────────────────────────────────────
+
+  private handleQuestionKeypress(key: readline.Key): void {
+    const question = this.activeQuestions[this.currentQuestionIndex];
+    if (!question) return;
+
+    const options = question.options || [];
+
+    // ── Freeform text mode (no options) ──
+    if (options.length === 0) {
+      if (key.name === "return") {
+        this.submitQuestionAnswer(this.otherText.trim() ? [this.otherText.trim()] : []);
+        return;
+      }
+      if (key.name === "escape") {
+        this.submitQuestionAnswer([]);
+        return;
+      }
+      if (key.name === "backspace") {
+        this.otherText = this.otherText.slice(0, -1);
+        this.render();
+        return;
+      }
+      if (typeof key.sequence === "string" && key.sequence >= " ") {
+        this.otherText += key.sequence;
+        this.render();
+      }
+      return;
+    }
+
+    const totalSlots = options.length + 1; // +1 for "Other"
+
+    // ── "Other" text input mode ──
+    if (this.otherMode) {
+      if (key.name === "escape") {
+        this.otherMode = false;
+        this.otherText = "";
+        this.render();
+        return;
+      }
+      if (key.name === "return") {
+        if (this.otherText.trim()) {
+          this.submitQuestionAnswer([this.otherText.trim()]);
+        }
+        return;
+      }
+      if (key.name === "up") {
+        this.otherMode = false;
+        this.optionIndex = totalSlots - 1;
+        this.render();
+        return;
+      }
+      if (key.name === "backspace") {
+        this.otherText = this.otherText.slice(0, -1);
+        this.render();
+        return;
+      }
+      if (typeof key.sequence === "string" && key.sequence >= " ") {
+        this.otherText += key.sequence;
+        this.render();
+      }
+      return;
+    }
+
+    // ── Option navigation mode ──
+    if (key.name === "up") {
+      this.optionIndex = Math.max(0, this.optionIndex - 1);
+      this.render();
+      return;
+    }
+    if (key.name === "down") {
+      this.optionIndex = Math.min(totalSlots - 1, this.optionIndex + 1);
+      this.render();
+      return;
+    }
+
+    if (key.name === "return" || key.name === " ") {
+      const isOther = this.optionIndex === options.length;
+
+      if (isOther) {
+        this.otherMode = true;
+        this.otherText = "";
+        this.render();
+        return;
+      }
+
+      const selectedOpt = options[this.optionIndex];
+      if (!selectedOpt) return;
+
+      if (question.multiSelect) {
+        if (this.multiSelected.has(this.optionIndex)) {
+          this.multiSelected.delete(this.optionIndex);
+        } else {
+          this.multiSelected.add(this.optionIndex);
+        }
+        this.render();
+        return;
+      }
+
+      // Single-select: auto-submit
+      this.submitQuestionAnswer([selectedOpt.label]);
+      return;
+    }
+
+    if (key.name === "tab" && question.multiSelect && this.multiSelected.size > 0) {
+      const selected = Array.from(this.multiSelected)
+        .sort((a, b) => a - b)
+        .map((i) => options[i].label);
+      this.submitQuestionAnswer(selected);
+      return;
+    }
+
+    if (key.name === "escape") {
+      this.submitQuestionAnswer([]);
+    }
+  }
+
+  private submitQuestionAnswer(selected: string[]): void {
+    this.questionAnswers.push({
+      question_index: this.currentQuestionIndex,
+      selected,
+    });
+
+    if (this.currentQuestionIndex + 1 < this.activeQuestions.length) {
+      this.currentQuestionIndex++;
+      this.optionIndex = 0;
+      this.multiSelected = new Set();
+      this.otherMode = false;
+      this.otherText = "";
+      this.render();
+      return;
+    }
+
+    // All questions answered — send to backend
+    this.sendBackend({
+      type: "answer",
+      answers: { answers: this.questionAnswers },
+      tool_call_id: this.questionToolCallId,
+    });
+
+    this.questionMode = false;
+    this.activeQuestions = [];
+    this.questionAnswers = [];
+    this.render();
+  }
+
+  private renderQuestionUI(width: number, maxHeight: number): string[] {
+    const lines: string[] = [];
+    const question = this.activeQuestions[this.currentQuestionIndex];
+
+    if (!question) {
+      lines.push(`${COLOR.secondary}  No questions.${COLOR.reset}`);
+      while (lines.length < maxHeight) lines.push("");
+      return lines;
+    }
+
+    const options = question.options || [];
+
+    // Progress indicator for multi-question
+    const progress =
+      this.activeQuestions.length > 1
+        ? ` (${this.currentQuestionIndex + 1}/${this.activeQuestions.length})`
+        : "";
+    const headerBadge = question.header ? ` [${question.header}]` : "";
+
+    lines.push("");
+    lines.push(`${COLOR.accent}${COLOR.bold}  ?${progress}${headerBadge}${COLOR.reset}`);
+    lines.push(`${COLOR.bold}  ${question.question}${COLOR.reset}`);
+    lines.push("");
+
+    // ── Freeform text mode (no options) ──
+    if (options.length === 0) {
+      const inputLine = ` > ${this.otherText}_`;
+      const padded = this.padRight(inputLine, width);
+      lines.push(`\x1b[7m${COLOR.bold}${padded}${COLOR.reset}`);
+      while (lines.length < maxHeight) lines.push("");
+      return lines;
+    }
+
+    // ── Options list ──
+    for (let i = 0; i < options.length; i++) {
+      const opt = options[i];
+      const highlighted = i === this.optionIndex;
+      const multiChecked = this.multiSelected.has(i);
+
+      if (question.multiSelect) {
+        const check = multiChecked ? "[x]" : "[ ]";
+        const label = `${check} ${opt.label}`;
+        const desc = opt.description ? ` - ${opt.description}` : "";
+        if (highlighted) {
+          const content = ` > ${label}${desc}`;
+          lines.push(`\x1b[7m${COLOR.bold}${this.padRight(content, width)}${COLOR.reset}`);
+        } else {
+          lines.push(`   ${COLOR.soft}${label}${COLOR.reset}${COLOR.dim}${desc}${COLOR.reset}`);
+        }
+      } else {
+        const desc = opt.description ? ` - ${opt.description}` : "";
+        if (highlighted) {
+          const content = ` > ${opt.label}${desc}`;
+          lines.push(`\x1b[7m${COLOR.bold}${this.padRight(content, width)}${COLOR.reset}`);
+        } else {
+          lines.push(`   ${COLOR.soft}${opt.label}${COLOR.reset}${COLOR.dim}${desc}${COLOR.reset}`);
+        }
+      }
+    }
+
+    // ── "Other" option ──
+    const isOtherHighlighted = this.optionIndex === options.length;
+    if (this.otherMode) {
+      const inputLine = ` > Other: ${this.otherText}_`;
+      lines.push(`\x1b[7m${COLOR.warning}${COLOR.bold}${this.padRight(inputLine, width)}${COLOR.reset}`);
+    } else if (isOtherHighlighted) {
+      const content = " > Other (自定义输入)...";
+      lines.push(`\x1b[7m${COLOR.bold}${this.padRight(content, width)}${COLOR.reset}`);
+    } else {
+      lines.push(`   ${COLOR.secondary}Other (自定义输入)...${COLOR.reset}`);
+    }
+
+    while (lines.length < maxHeight) lines.push("");
+    return lines;
+  }
+
+  private getQuestionKeybindingHint(): string {
+    const question = this.activeQuestions[this.currentQuestionIndex];
+    if (!question) return "";
+    if (this.otherMode || !question.options?.length) return "Enter 确认  Esc 取消";
+
+    const parts = ["↑↓ 选择"];
+    if (question.multiSelect) {
+      parts.push("Space 切换");
+      parts.push("Tab 提交");
+    } else {
+      parts.push("Enter 确认");
+    }
+    parts.push("Esc 跳过");
+    return parts.join("  ");
+  }
     const line = this.inputLines[this.cursorRow];
     this.inputLines[this.cursorRow] = line.slice(0, this.cursorCol) + text + line.slice(this.cursorCol);
     this.cursorCol += text.length;
@@ -556,6 +1010,39 @@ class TypeScriptTui {
     const width = process.stdout.columns || 120;
     const height = process.stdout.rows || 40;
     const header = this.renderHeader(width);
+
+    if (this.showSessionPicker) {
+      const picker = this.renderSessionPicker(width, Math.max(8, height - header.length - 4));
+      const footer = [
+        "",
+        `${COLOR.secondary}↑↓ 选择  Enter 恢复  Esc 新会话${COLOR.reset}`,
+      ];
+      const frameLines = [...header, ...picker, ...footer];
+      const frame = frameLines.join("\n");
+      if (frame !== this.lastFrame) {
+        process.stdout.write("\x1b[H\x1b[2J");
+        process.stdout.write(frame);
+        this.lastFrame = frame;
+      }
+      return;
+    }
+
+    if (this.questionMode) {
+      const questionUI = this.renderQuestionUI(width, Math.max(8, height - header.length - 4));
+      const footer = [
+        "",
+        `${COLOR.secondary}${this.getQuestionKeybindingHint()}${COLOR.reset}`,
+      ];
+      const frameLines = [...header, ...questionUI, ...footer];
+      const frame = frameLines.join("\n");
+      if (frame !== this.lastFrame) {
+        process.stdout.write("\x1b[H\x1b[2J");
+        process.stdout.write(frame);
+        this.lastFrame = frame;
+      }
+      return;
+    }
+
     const composer = this.renderComposer(width);
     const footer = this.renderFooter(width);
     const reserved = header.length + composer.length + footer.length;
@@ -642,6 +1129,16 @@ class TypeScriptTui {
     const availableWidth = Math.max(12, width - 4);
     const prefix = role === "user" ? "❯ " : role === "assistant" ? "⏺ " : "  ";
     const continuation = "  ";
+
+    if (role === "assistant") {
+      const renderedLines = this.renderMarkdownLines(content || " ", availableWidth);
+      return renderedLines.map((line, index) => {
+        const leader = index === 0 ? prefix : continuation;
+        const marker = `${COLOR.accent}${COLOR.bold}${leader}${COLOR.reset}`;
+        return `${marker}${line}`;
+      });
+    }
+
     const wrapped = this.wrap(content || " ", availableWidth);
     return wrapped.map((line, index) => {
       const leader = index === 0 ? prefix : continuation;
@@ -650,17 +1147,318 @@ class TypeScriptTui {
         : line;
       const body = role === "user"
         ? `${COLOR.bold}${contentWithState}${COLOR.reset}`
-        : role === "assistant"
-          ? `${COLOR.soft}${line}${COLOR.reset}`
-          : `${COLOR.secondary}${line}${COLOR.reset}`;
+        : `${COLOR.secondary}${line}${COLOR.reset}`;
       const marker = role === "user"
         ? `${COLOR.user}${COLOR.bold}${leader}${COLOR.reset}`
-        : role === "assistant"
-          ? `${COLOR.accent}${COLOR.bold}${leader}${COLOR.reset}`
-          : `${COLOR.secondary}${leader}${COLOR.reset}`;
+        : `${COLOR.secondary}${leader}${COLOR.reset}`;
       return `${marker}${body}`;
     });
   }
+
+  // ── Markdown → ANSI renderer ──────────────────────────────────────
+  // Processes markdown source and returns lines of ANSI-styled text,
+  // each line already wrapped to `width`.
+
+  private renderMarkdownLines(content: string, width: number): string[] {
+    const lines: string[] = [];
+    const sourceLines = content.split("\n");
+    let i = 0;
+
+    while (i < sourceLines.length) {
+      const raw = sourceLines[i];
+
+      // ── Fenced code block ────────────────────────────────────
+      const fenceMatch = raw.match(/^(\s*)```/);
+      if (fenceMatch) {
+        const fenceIndent = fenceMatch[1];
+        const codeLines: string[] = [];
+        i++;
+        while (i < sourceLines.length && !sourceLines[i].match(/^\s*```/)) {
+          codeLines.push(sourceLines[i]);
+          i++;
+        }
+        i++; // skip closing ```
+        for (const cl of codeLines) {
+          const indented = fenceIndent + "  " + cl;
+          lines.push(`${COLOR.md.codeBg}${COLOR.md.code}${this.padRight(indented, width)}${COLOR.reset}`);
+        }
+        if (codeLines.length === 0) {
+          lines.push(`${COLOR.md.codeBg}${COLOR.md.code}${this.padRight(fenceIndent + "  ", width)}${COLOR.reset}`);
+        }
+        continue;
+      }
+
+      // ── Table ────────────────────────────────────────────────
+      if (raw.includes("|") && raw.trim().startsWith("|")) {
+        const tableBlock: string[] = [];
+        while (i < sourceLines.length && sourceLines[i].includes("|") && sourceLines[i].trim().startsWith("|")) {
+          tableBlock.push(sourceLines[i]);
+          i++;
+        }
+        lines.push(...this.renderMarkdownTable(tableBlock, width));
+        continue;
+      }
+
+      // ── Heading ──────────────────────────────────────────────
+      const headingMatch = raw.match(/^(#{1,6})\s+(.*)/);
+      if (headingMatch) {
+        const level = headingMatch[1].length;
+        const text = this.renderInlineMarkdown(headingMatch[2]);
+        const prefix = "▎" + " ".repeat(Math.max(0, 4 - level));
+        lines.push("");
+        lines.push(`${COLOR.md.headingBold}${prefix}${text}${COLOR.reset}`);
+        lines.push("");
+        i++;
+        continue;
+      }
+
+      // ── Horizontal rule ──────────────────────────────────────
+      if (/^(\s*[-*_]){3,}\s*$/.test(raw)) {
+        lines.push(`${COLOR.md.hr}${"─".repeat(width)}${COLOR.reset}`);
+        i++;
+        continue;
+      }
+
+      // ── Blockquote ───────────────────────────────────────────
+      if (raw.startsWith(">")) {
+        const quoteLines: string[] = [];
+        while (i < sourceLines.length && sourceLines[i].startsWith(">")) {
+          quoteLines.push(sourceLines[i].replace(/^>\s?/, ""));
+          i++;
+        }
+        for (const ql of quoteLines) {
+          const styled = this.renderInlineMarkdown(ql);
+          const wrapped = this.wrapAnsiAware(styled, width - 2);
+          for (const wl of wrapped) {
+            lines.push(`${COLOR.md.blockquote}▎ ${wl}${COLOR.reset}`);
+          }
+        }
+        continue;
+      }
+
+      // ── Unordered list ───────────────────────────────────────
+      if (/^\s*[-*+]\s/.test(raw)) {
+        while (i < sourceLines.length && /^\s*[-*+]\s/.test(sourceLines[i])) {
+          const itemText = sourceLines[i].replace(/^\s*[-*+]\s/, "");
+          const styled = this.renderInlineMarkdown(itemText);
+          const wrapped = this.wrapAnsiAware(styled, width - 2);
+          for (let wi = 0; wi < wrapped.length; wi++) {
+            const bullet = wi === 0 ? `${COLOR.md.listBullet}• ${COLOR.reset}` : "  ";
+            lines.push(`${bullet}${wrapped[wi]}`);
+          }
+          i++;
+        }
+        continue;
+      }
+
+      // ── Ordered list ─────────────────────────────────────────
+      if (/^\s*\d+\.\s/.test(raw)) {
+        let num = 1;
+        while (i < sourceLines.length && /^\s*\d+\.\s/.test(sourceLines[i])) {
+          const itemText = sourceLines[i].replace(/^\s*\d+\.\s/, "");
+          const styled = this.renderInlineMarkdown(itemText);
+          const wrapped = this.wrapAnsiAware(styled, width - 4);
+          for (let wi = 0; wi < wrapped.length; wi++) {
+            const bullet = wi === 0
+              ? `${COLOR.md.listBullet}${String(num).padStart(2)}. ${COLOR.reset}`
+              : "    ";
+            lines.push(`${bullet}${wrapped[wi]}`);
+          }
+          num++;
+          i++;
+        }
+        continue;
+      }
+
+      // ── Empty line ───────────────────────────────────────────
+      if (!raw.trim()) {
+        lines.push("");
+        i++;
+        continue;
+      }
+
+      // ── Paragraph (default) ──────────────────────────────────
+      const styled = this.renderInlineMarkdown(raw);
+      const wrapped = this.wrapAnsiAware(styled, width);
+      lines.push(...wrapped);
+      i++;
+    }
+
+    return lines;
+  }
+
+  /** Render inline markdown: **bold**, *italic*, `code`, ~~strike~~, [link](url) */
+  private renderInlineMarkdown(text: string): string {
+    // Escape sequences we insert use \x00 markers to avoid double-processing
+    let result = text;
+
+    // Inline code: `code`
+    result = result.replace(/`([^`]+)`/g, (_, code) =>
+      `\x00CODE_START\x00${code}\x00CODE_END\x00`);
+
+    // Bold + italic: ***text***
+    result = result.replace(/\*\*\*(.+?)\*\*\*/g, (_, t) =>
+      `\x00BI_START\x00${t}\x00BI_END\x00`);
+
+    // Bold: **text**
+    result = result.replace(/\*\*(.+?)\*\*/g, (_, t) =>
+      `\x00B_START\x00${t}\x00B_END\x00`);
+
+    // Italic: *text*
+    result = result.replace(/(?<!\*)\*([^*]+?)\*(?!\*)/g, (_, t) =>
+      `\x00I_START\x00${t}\x00I_END\x00`);
+
+    // Strikethrough: ~~text~~
+    result = result.replace(/~~(.+?)~~/g, (_, t) =>
+      `\x00S_START\x00${t}\x00S_END\x00`);
+
+    // Links: [text](url)
+    result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, linkText, url) =>
+      `\x00LINK_START\x00${linkText}\x00LINK_MID\x00${url}\x00LINK_END\x00`);
+
+    // Replace markers with ANSI
+    result = result
+      .replace(/\x00CODE_START\x00/g, `${COLOR.md.codeBg}${COLOR.md.code}`)
+      .replace(/\x00CODE_END\x00/g, COLOR.reset)
+      .replace(/\x00BI_START\x00/g, `${COLOR.bold}${COLOR.italic}`)
+      .replace(/\x00BI_END\x00/g, COLOR.reset)
+      .replace(/\x00B_START\x00/g, COLOR.bold)
+      .replace(/\x00B_END\x00/g, COLOR.reset)
+      .replace(/\x00I_START\x00/g, COLOR.italic)
+      .replace(/\x00I_END\x00/g, COLOR.reset)
+      .replace(/\x00S_START\x00/g, COLOR.strikethrough)
+      .replace(/\x00S_END\x00/g, COLOR.reset)
+      .replace(/\x00LINK_START\x00/g, COLOR.md.link)
+      .replace(/\x00LINK_MID\x00/g, `${COLOR.reset} `)
+      .replace(/\x00LINK_END\x00/g, COLOR.reset);
+
+    return `${COLOR.soft}${result}${COLOR.reset}`;
+  }
+
+  /** Render a markdown table block into ANSI-styled lines */
+  private renderMarkdownTable(tableRows: string[], _width: number): string[] {
+    if (tableRows.length === 0) return [];
+
+    const parsedRows: string[][] = [];
+    for (const row of tableRows) {
+      // Skip separator rows like |---|---|
+      if (/^\|[\s\-:|]+\|$/.test(row.trim())) continue;
+      const cells = row.split("|").slice(1, -1).map((c) => c.trim());
+      parsedRows.push(cells);
+    }
+
+    if (parsedRows.length === 0) return [];
+
+    // Calculate column widths
+    const colCount = Math.max(...parsedRows.map((r) => r.length));
+    const colWidths: number[] = [];
+    for (let c = 0; c < colCount; c++) {
+      let maxW = 0;
+      for (const row of parsedRows) {
+        const cell = row[c] || "";
+        maxW = Math.max(maxW, this.visibleLength(this.stripAnsi(cell)));
+      }
+      colWidths.push(maxW);
+    }
+
+    const lines: string[] = [];
+    const b = COLOR.md.tableBorder;
+    const r = COLOR.reset;
+
+    for (let ri = 0; ri < parsedRows.length; ri++) {
+      const row = parsedRows[ri];
+      const styledCells: string[] = [];
+      for (let c = 0; c < colCount; c++) {
+        const cell = row[c] || "";
+        const isHeader = ri === 0;
+        const styled = isHeader ? `${COLOR.md.tableHeader}${cell}${COLOR.reset}` : `${COLOR.soft}${cell}${COLOR.reset}`;
+        const plainLen = this.visibleLength(cell);
+        const pad = " ".repeat(Math.max(0, colWidths[c] - plainLen));
+        styledCells.push(` ${styled}${pad} `);
+      }
+      lines.push(`${b}│${r}${styledCells.join(`${b}│${r}`)}${b}│${r}`);
+
+      if (ri === 0) {
+        const sep = colWidths.map((w) => `${b}${"─".repeat(w + 2)}${r}`);
+        lines.push(`${b}├${r}${sep.join(`${b}┼${r}`)}${b}┤${r}`);
+      }
+    }
+
+    return lines;
+  }
+
+  /** Wrap text that may contain ANSI escape sequences, preserving them across line breaks */
+  private wrapAnsiAware(text: string, width: number): string[] {
+    return text.split("\n").flatMap((line) => {
+      if (!line || this.visibleLength(line) <= width) return [line];
+
+      const parts: string[] = [];
+      let remaining = line;
+      while (this.visibleLength(remaining) > width) {
+        const [chunk, rest] = this.sliceByWidthAnsi(remaining, width);
+        parts.push(chunk);
+        remaining = rest;
+      }
+      parts.push(remaining);
+      return parts;
+    });
+  }
+
+  /** Slice text by visible width while keeping ANSI sequences intact.
+   *  Returns [slicedPart, remaining]. */
+  private sliceByWidthAnsi(text: string, width: number): [string, string] {
+    let result = "";
+    let consumed = 0;
+    let visiblePos = 0;
+    let activeStyles = "";
+
+    const ansiRegex = /\x1b\[[0-9;]*m/g;
+    let match: RegExpExecArray | null;
+    let lastIndex = 0;
+
+    // Collect all ANSI sequences with their positions
+    const sequences: { index: number; length: number; code: string }[] = [];
+    ansiRegex.lastIndex = 0;
+    while ((match = ansiRegex.exec(text)) !== null) {
+      sequences.push({ index: match.index, length: match[0].length, code: match[0] });
+    }
+
+    let seqIndex = 0;
+    for (const char of Array.from(text)) {
+      const charPos = text.indexOf(char, lastIndex);
+
+      // Process any ANSI sequences before this character
+      while (seqIndex < sequences.length && sequences[seqIndex].index < charPos + char.length) {
+        const seq = sequences[seqIndex];
+        if (seq.index >= lastIndex && seq.index <= charPos) {
+          activeStyles += seq.code;
+          seqIndex++;
+        } else {
+          break;
+        }
+      }
+
+      const cw = this.charWidth(char);
+      if (visiblePos + cw > width) {
+        // Emit a reset at the end of this line and prepend active styles to next line
+        return [result + COLOR.reset, activeStyles + text.slice(charPos)];
+      }
+
+      result += char;
+      visiblePos += cw;
+      lastIndex = charPos + char.length;
+    }
+
+    return [result, ""];
+  }
+
+  private padRight(text: string, width: number): string {
+    const visible = this.visibleLength(text);
+    if (visible >= width) return text;
+    return text + " ".repeat(width - visible);
+  }
+
+  // ── End Markdown renderer ─────────────────────────────────────
 
   private renderToolSummary(width: number): string[] {
     const summaries: string[] = [];
