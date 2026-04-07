@@ -430,12 +430,22 @@ class TypeScriptTui {
     const baseCode = code & 0b111111;
     const isDrag = (code & 32) !== 0;
     const isLeftButton = baseCode === 0 || (isDrag && (baseCode - 32) === 0);
+    const isRightButton = baseCode === 2 || (isDrag && (baseCode - 32) === 2);
 
     if (kind === "M" && isLeftButton && !isDrag) {
       this.selectionAnchor = point;
       this.selectionFocus = point;
       this.draggingSelection = true;
       this.render();
+      return;
+    }
+
+    if (kind === "M" && isRightButton && !isDrag) {
+      // 右键点击复制选中的内容
+      if (this.hasSelection()) {
+        this.copySelectionToClipboard();
+        this.render();
+      }
       return;
     }
 
