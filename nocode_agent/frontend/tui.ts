@@ -56,6 +56,7 @@ type ThreadInfo = {
   thread_id: string;
   preview: string;
   message_count: number;
+  source?: string;
 };
 
 type QuestionOption = {
@@ -212,8 +213,10 @@ class TypeScriptTui {
   private readonly resumeMode: boolean;
   private showSessionPicker = false;
   private sessionThreads: ThreadInfo[] = [];
+  private sessionPickerThreads: ThreadInfo[] = [];
   private sessionPickerIndex = 0;
   private sessionPickerScroll = 0;
+  private sessionPickerQuery = "";
 
   // ── Question mode state ───────────────────────────────────
   private questionMode = false;
@@ -327,6 +330,10 @@ class TypeScriptTui {
   private onKeypress(key: readline.Key): void {
     // ── Session picker mode ───────────────────────────────
     if (this.showSessionPicker) {
+      if ((key.ctrl && key.name === "c") || (key.meta && key.name === "c")) {
+        this.cancelSessionPicker("取消恢复，使用新会话。");
+        return;
+      }
       if (key.name === "up" || key.meta && key.name === "k") {
         this.moveSessionPicker(-1);
         return;
@@ -340,8 +347,20 @@ class TypeScriptTui {
         return;
       }
       if (key.name === "escape") {
-        this.showSessionPicker = false;
-        this.pushHistory({ kind: "message", role: "system", content: "取消恢复，使用新会话。" });
+        this.cancelSessionPicker("取消恢复，使用新会话。");
+        return;
+      }
+      if (key.name === "backspace") {
+        if (this.sessionPickerQuery) {
+          this.sessionPickerQuery = this.sessionPickerQuery.slice(0, -1);
+          this.refreshSessionPickerThreads();
+          this.render();
+        }
+        return;
+      }
+      if (typeof key.sequence === "string" && key.sequence >= " ") {
+        this.sessionPickerQuery += key.sequence;
+        this.refreshSessionPickerThreads();
         this.render();
         return;
       }
@@ -356,6 +375,9 @@ class TypeScriptTui {
 
     // ── Normal input mode ─────────────────────────────────
     if ((key.ctrl && key.name === "c") || (key.meta && key.name === "c")) {
+      if (this.copySelectionIfPresent()) {
+        return;
+      }
       this.exiting = true;
       this.shutdown();
       process.exit(0);
@@ -368,13 +390,15 @@ class TypeScriptTui {
 
     const isAltJ = key.meta && key.name === "j";
     const isAltK = key.meta && key.name === "k";
+    const isCtrlJ = key.ctrl && key.name === "j";
+    const isCtrlK = key.ctrl && key.name === "k";
 
-    if (isAltJ) {
+    if (isAltJ || isCtrlJ) {
       this.moveToolSelection(1);
       return;
     }
 
-    if (isAltK) {
+    if (isAltK || isCtrlK) {
       this.moveToolSelection(-1);
       return;
     }
@@ -445,6 +469,13 @@ class TypeScriptTui {
 
   private onRawInput(chunk: string): void {
     if (this.isCtrlCSequence(chunk)) {
+      if (this.showSessionPicker) {
+        this.cancelSessionPicker("取消恢复，使用新会话。");
+        return;
+      }
+      if (this.copySelectionIfPresent()) {
+        return;
+      }
       this.exiting = true;
       this.shutdown();
       process.exit(0);
@@ -621,6 +652,21 @@ class TypeScriptTui {
     process.stdout.write(`\x1b]52;c;${base64}\x07`);
   }
 
+  private copySelectionIfPresent(): boolean {
+    if (!this.selectedText) {
+      return false;
+    }
+    this.copySelectionToClipboard();
+    this.pushHistory({
+      kind: "message",
+      role: "system",
+      content: "已复制当前选区到剪贴板。",
+    });
+    this.clearSelection();
+    this.render();
+    return true;
+  }
+
   private isShiftEnterSequence(chunk: string): boolean {
     return chunk === "\x1b[13;2u"
       || chunk === "\x1b[13;2~"
@@ -645,9 +691,7 @@ class TypeScriptTui {
 
   private handleEscape(): void {
     if (this.showSessionPicker) {
-      this.showSessionPicker = false;
-      this.pushHistory({ kind: "message", role: "system", content: "取消恢复，使用新会话。" });
-      this.render();
+      this.cancelSessionPicker("取消恢复，使用新会话。");
       return;
     }
 
@@ -699,6 +743,7 @@ class TypeScriptTui {
         this.selectedToolId = null;
         this.followLatestTool = true;
         this.scrollOffset = 0;
+        this.clearSelection();
         break;
       case "text":
         this.streaming += event.delta;
@@ -777,9 +822,8 @@ class TypeScriptTui {
         break;
       case "thread_list":
         this.sessionThreads = event.threads;
-        this.sessionPickerIndex = 0;
-        this.sessionPickerScroll = 0;
-        if (this.sessionThreads.length === 0) {
+        this.refreshSessionPickerThreads();
+        if (this.sessionPickerThreads.length === 0) {
           this.showSessionPicker = false;
           this.pushHistory({ kind: "message", role: "system", content: "没有找到历史会话，将创建新会话。" });
         }
@@ -840,31 +884,39 @@ class TypeScriptTui {
   }
 
   private runCommand(text: string): void {
-    const command = text.trim().toLowerCase();
+    const trimmed = text.trim();
+    const [rawName, ...restParts] = trimmed.slice(1).split(/\s+/);
+    const commandName = (rawName || "").toLowerCase();
+    const args = restParts.join(" ").trim();
     this.clearInput();
 
-    if (command === "/quit" || command === "/exit") {
+    if (commandName === "quit" || commandName === "exit") {
       this.exiting = true;
       this.shutdown();
       process.exit(0);
     }
 
-    if (command === "/clear") {
+    if (commandName === "clear") {
       this.sendBackend({ type: "clear" });
       this.render();
       return;
     }
 
-    if (command === "/session") {
+    if (commandName === "session") {
       this.sendBackend({ type: "status" });
       return;
     }
 
-    if (command === "/help") {
+    if (commandName === "resume" || commandName === "continue") {
+      this.openSessionPicker(args);
+      return;
+    }
+
+    if (commandName === "help") {
       this.pushHistory({
         kind: "message",
         role: "system",
-        content: "Commands: /help /clear /session /quit\nESC clear input / interrupt agent\nEnter submits\nShift+Enter inserts newline\nScroll/PgUp/PgDn 滚动  鼠标拖拽选择并自动复制\nAlt+J/K select tool  Alt+O expand tool result\n启动时加 --resume 可选择历史会话恢复",
+        content: "Commands: /help /clear /session /resume [/continue] /quit\nESC 清空输入 / 中断生成\nEnter 发送，Shift+Enter 换行\n鼠标滚轮上下滚动；拖拽可选中文本并自动复制，Ctrl+C 可复制当前选区\nCtrl+J/K 或 Alt+J/K 选择工具，Ctrl+O 或 Alt+O 展开工具\n/resume 支持直接输入 thread id 后缀或预览关键词进行过滤恢复",
       });
       this.render();
       return;
@@ -1149,25 +1201,76 @@ class TypeScriptTui {
   // ── Session picker helpers ────────────────────────────────
 
   private moveSessionPicker(delta: number): void {
-    if (this.sessionThreads.length === 0) return;
+    if (this.sessionPickerThreads.length === 0) return;
     this.sessionPickerIndex = Math.max(
       0,
-      Math.min(this.sessionThreads.length - 1, this.sessionPickerIndex + delta),
+      Math.min(this.sessionPickerThreads.length - 1, this.sessionPickerIndex + delta),
     );
     this.render();
   }
 
   private confirmSessionPicker(): void {
-    if (this.sessionThreads.length === 0) return;
-    const selected = this.sessionThreads[this.sessionPickerIndex];
+    if (this.sessionPickerThreads.length === 0) return;
+    const selected = this.sessionPickerThreads[this.sessionPickerIndex];
     if (!selected) return;
     this.sendBackend({ type: "resume_thread", thread_id: selected.thread_id });
+  }
+
+  private cancelSessionPicker(message: string): void {
+    this.showSessionPicker = false;
+    this.sessionPickerQuery = "";
+    this.sessionPickerThreads = this.sessionThreads;
+    this.sessionPickerIndex = 0;
+    this.sessionPickerScroll = 0;
+    this.pushHistory({ kind: "message", role: "system", content: message });
+    this.render();
+  }
+
+  private openSessionPicker(query = ""): void {
+    this.showSessionPicker = true;
+    this.sessionPickerQuery = query.trim();
+    this.sessionPickerIndex = 0;
+    this.sessionPickerScroll = 0;
+    this.sendBackend({ type: "list_threads", source: "tui" });
+    this.render();
+  }
+
+  private refreshSessionPickerThreads(): void {
+    const query = this.sessionPickerQuery.trim().toLowerCase();
+    this.sessionPickerThreads = query
+      ? this.sessionThreads.filter((thread) => this.matchesSessionQuery(thread, query))
+      : [...this.sessionThreads];
+    if (query && this.sessionPickerThreads.length === 1 && this.isExactSessionMatch(this.sessionPickerThreads[0], query)) {
+      const only = this.sessionPickerThreads[0];
+      if (only) {
+        this.sendBackend({ type: "resume_thread", thread_id: only.thread_id });
+        return;
+      }
+    }
+    this.sessionPickerIndex = Math.max(0, Math.min(this.sessionPickerThreads.length - 1, this.sessionPickerIndex));
+    this.sessionPickerScroll = Math.max(0, this.sessionPickerScroll);
+  }
+
+  private matchesSessionQuery(thread: ThreadInfo, query: string): boolean {
+    const threadId = thread.thread_id.toLowerCase();
+    const preview = (thread.preview || "").toLowerCase();
+    return threadId.includes(query) || preview.includes(query) || threadId.endsWith(query);
+  }
+
+  private isExactSessionMatch(thread: ThreadInfo, query: string): boolean {
+    const threadId = thread.thread_id.toLowerCase();
+    const preview = (thread.preview || "").toLowerCase().trim();
+    return threadId === query || threadId.endsWith(query) || preview === query;
   }
 
   private renderSessionPicker(width: number, maxHeight: number): string[] {
     const lines: string[] = [];
     lines.push("");
     lines.push(`${COLOR.accent}${COLOR.bold}  📋 恢复历史会话${COLOR.reset}`);
+    const queryHint = this.sessionPickerQuery
+      ? `  过滤: ${this.sessionPickerQuery}`
+      : "  输入关键词或 thread id 后缀过滤";
+    lines.push(`${COLOR.secondary}${queryHint}${COLOR.reset}`);
     lines.push("");
 
     if (this.sessionThreads.length === 0) {
@@ -1176,11 +1279,17 @@ class TypeScriptTui {
       return lines;
     }
 
+    if (this.sessionPickerThreads.length === 0) {
+      lines.push(`${COLOR.warning}  没有匹配的会话，继续输入以过滤或按 Esc 取消。${COLOR.reset}`);
+      while (lines.length < maxHeight) lines.push("");
+      return lines;
+    }
+
     const idWidth = 12;
     const previewWidth = Math.max(12, width - idWidth - 14);
 
-    // Reserve 3 lines for header, rest for items
-    const visibleItems = Math.max(1, maxHeight - 3);
+    // Reserve 4 lines for header, rest for items
+    const visibleItems = Math.max(1, maxHeight - 4);
 
     // Clamp scroll so selected item is always visible
     if (this.sessionPickerIndex < this.sessionPickerScroll) {
@@ -1189,9 +1298,9 @@ class TypeScriptTui {
       this.sessionPickerScroll = this.sessionPickerIndex - visibleItems + 1;
     }
 
-    const end = Math.min(this.sessionThreads.length, this.sessionPickerScroll + visibleItems);
+    const end = Math.min(this.sessionPickerThreads.length, this.sessionPickerScroll + visibleItems);
     for (let i = this.sessionPickerScroll; i < end; i++) {
-      const t = this.sessionThreads[i];
+      const t = this.sessionPickerThreads[i];
       const selected = i === this.sessionPickerIndex;
       const id = this.truncate(t.thread_id.slice(-idWidth), idWidth);
       const preview = this.truncate(t.preview || "(empty)", previewWidth);
@@ -1209,8 +1318,8 @@ class TypeScriptTui {
     }
 
     // Show scroll hint if there are more items
-    if (this.sessionThreads.length > visibleItems) {
-      const remaining = this.sessionThreads.length - end;
+    if (this.sessionPickerThreads.length > visibleItems) {
+      const remaining = this.sessionPickerThreads.length - end;
       if (remaining > 0) {
         lines.push(`${COLOR.dim}   ... 还有 ${remaining} 个会话${COLOR.reset}`);
       }
@@ -2197,7 +2306,8 @@ class TypeScriptTui {
     const state = this.generating ? "busy" : "idle";
     const queue = this.pendingPrompts.length > 0 ? `  queue ${this.pendingPrompts.length}` : "";
     const scroll = this.scrollOffset > 0 ? `  scroll +${this.scrollOffset}` : "";
-    const text = `Enter submit  Shift+Enter newline  Scroll/PgUp/PgDn scroll  Alt+J/K tool  ${state}${queue}  ${this.subagentModel}${scroll}`;
+    const selection = this.selectedText ? "  selection copied/ctrl+c" : "";
+    const text = `Enter submit  Shift+Enter newline  Wheel/PgUp/PgDn scroll  Ctrl+J/K tool  Ctrl+O expand  ${state}${queue}${selection}  ${this.subagentModel}${scroll}`;
     return ["", `${COLOR.secondary}${this.truncate(text, width)}${COLOR.reset}`];
   }
 
@@ -2364,6 +2474,12 @@ class TypeScriptTui {
       this.scrollOffset = nextOffset;
       this.render();
     }
+  }
+
+  private clearSelection(): void {
+    this.mouseSelection = null;
+    this.selectedText = "";
+    this.selectionRanges = [];
   }
 
   private positionCursor(width: number, promptStartRow: number): void {
