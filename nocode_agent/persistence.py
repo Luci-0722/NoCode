@@ -148,3 +148,50 @@ def list_threads(
         return results
     finally:
         db.close()
+
+
+def load_thread_messages(db_path: str, thread_id: str) -> list[dict[str, str]]:
+    """Load human/ai messages from a thread's checkpoint state.
+
+    Returns a list of dicts with keys: role, content.
+    Filters out tool messages and system metadata.
+    """
+    import sqlite3 as _sqlite3
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    db_path = str(Path(db_path).expanduser())
+    if not Path(db_path).exists():
+        return []
+
+    db = _sqlite3.connect(db_path)
+    try:
+        saver = SqliteSaver(db)
+        saver.setup()
+        state = saver.get({"configurable": {"thread_id": thread_id}})
+        if not state:
+            return []
+        cv = state.get("channel_values", {})
+        msgs = cv.get("messages", [])
+
+        results: list[dict[str, str]] = []
+        for m in msgs:
+            if isinstance(m, ToolMessage):
+                continue
+            if isinstance(m, HumanMessage):
+                content = m.content if isinstance(m.content, str) else str(m.content)
+                results.append({"role": "user", "content": content})
+            elif isinstance(m, AIMessage):
+                # Use .text for token-level content, fallback to .content
+                content = getattr(m, "text", "") or ""
+                if not content:
+                    content = m.content if isinstance(m.content, str) else str(m.content)
+                if not content.strip():
+                    continue
+                results.append({"role": "assistant", "content": content})
+            elif isinstance(m, SystemMessage):
+                content = m.content if isinstance(m.content, str) else str(m.content)
+                results.append({"role": "system", "content": content})
+        return results
+    finally:
+        db.close()

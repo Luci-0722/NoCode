@@ -17,6 +17,8 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Any
 
+from enum import Flag, auto
+
 from langchain.tools import tool
 from langchain_core.messages import AIMessage, BaseMessage
 from pydantic import BaseModel, Field
@@ -25,6 +27,64 @@ logger = logging.getLogger(__name__)
 
 _MAX_OUTPUT = 12_000
 _TODO_STORE: list[str] = []
+
+
+# ---------------------------------------------------------------------------
+# Tool safety flags — mirrors Claude Code's Tool.ts isConcurrencySafe /
+# isReadOnly / isDestructive with fail-closed defaults.
+#
+# Source: claude-code-analysis/src/Tool.ts:748-761
+#   - isConcurrencySafe → false (assume not safe)
+#   - isReadOnly         → false (assume writes)
+#   - isDestructive      → false
+#
+# Per-tool overrides (from individual tool files):
+#   FileReadTool.ts:373  GlobTool.ts:76   GrepTool.ts:183
+# ---------------------------------------------------------------------------
+
+class ToolSafety(Flag):
+    READ_ONLY = auto()
+    CONCURRENCY_SAFE = auto()
+    DESTRUCTIVE = auto()
+
+
+# Unlisted tools default to "unsafe" (fail-closed), matching Tool.ts:757-761.
+_TOOL_SAFETY: dict[str, ToolSafety] = {
+    # Concurrency-safe + read-only
+    "read":              ToolSafety.READ_ONLY | ToolSafety.CONCURRENCY_SAFE,
+    "glob":              ToolSafety.READ_ONLY | ToolSafety.CONCURRENCY_SAFE,
+    "list_dir":          ToolSafety.READ_ONLY | ToolSafety.CONCURRENCY_SAFE,
+    "grep":              ToolSafety.READ_ONLY | ToolSafety.CONCURRENCY_SAFE,
+    "web_search":        ToolSafety.READ_ONLY | ToolSafety.CONCURRENCY_SAFE,
+    "web_fetch":         ToolSafety.READ_ONLY | ToolSafety.CONCURRENCY_SAFE,
+    "todo_read":         ToolSafety.READ_ONLY | ToolSafety.CONCURRENCY_SAFE,
+    # Concurrency-safe but not read-only (cf. TaskUpdateTool, ConfigTool)
+    "ask_user_question": ToolSafety.CONCURRENCY_SAFE,
+    "todo_write":        ToolSafety.CONCURRENCY_SAFE,
+    # Unsafe — use default fail-closed
+    "write":             ToolSafety.DESTRUCTIVE,
+    "edit":              ToolSafety.DESTRUCTIVE,
+    "bash":              ToolSafety(0),
+}
+
+
+def is_concurrency_safe(tool_name: str) -> bool:
+    """Check if a tool can be safely executed concurrently.
+
+    Source: claude-code-analysis/src/Tool.ts:402  isConcurrencySafe()
+    Default is ``False`` (fail-closed).
+    """
+    safety = _TOOL_SAFETY.get(tool_name)
+    return safety is not None and ToolSafety.CONCURRENCY_SAFE in safety
+
+
+def is_read_only(tool_name: str) -> bool:
+    """Check if a tool is read-only (never modifies the filesystem).
+
+    Source: claude-code-analysis/src/Tool.ts:404  isReadOnly()
+    """
+    safety = _TOOL_SAFETY.get(tool_name)
+    return safety is not None and ToolSafety.READ_ONLY in safety
 
 
 def _workspace_root() -> Path:

@@ -331,6 +331,13 @@ class NoCodeAgent(Agent):
                         )
                     continue
 
+                if event_type == "retry":
+                    logger.warning(
+                        "重试中: session=%s, attempt=%d/%d, %.1fs",
+                        session_id, data[1], data[2], data[3],
+                    )
+                    continue
+
                 if event_type == "tool_start":
                     tool_name = str(data[0] or "tool")
                     tool_args = data[1] if len(data) > 1 and isinstance(data[1], dict) else {}

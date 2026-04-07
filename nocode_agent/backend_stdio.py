@@ -12,8 +12,7 @@ from typing import Any
 from nocode_agent.agent import create_mainagent
 from nocode_agent.config import load_config
 from nocode_agent.log import setup_logging
-from nocode_agent.persistence import list_threads, resolve_checkpoint_path
-from nocode_agent.tools import cancel_question_future, resolve_question_future
+from nocode_agent.persistence import list_threads, load_thread_messages, resolve_checkpoint_path
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +53,16 @@ async def _stream_prompt(agent, prompt: str) -> None:
         async for event_type, *data in agent.chat(prompt):
             if event_type == "text":
                 _emit({"type": "text", "delta": data[0]})
+            elif event_type == "retry":
+                _emit(
+                    {
+                        "type": "retry",
+                        "message": str(data[0]),
+                        "attempt": data[1],
+                        "max_retries": data[2],
+                        "delay": data[3],
+                    }
+                )
             elif event_type == "tool_start":
                 name = data[0]
                 args = data[1] if len(data) > 1 else {}
@@ -67,10 +76,12 @@ async def _stream_prompt(agent, prompt: str) -> None:
                     }
                 )
                 if name == "ask_user_question":
+                    qs = args.get("questions", [])
+                    logger.info("ask_user_question detected, questions=%s", qs)
                     _emit(
                         {
                             "type": "question",
-                            "questions": args.get("questions", []),
+                            "questions": qs,
                             "tool_call_id": tool_call_id,
                         }
                     )
@@ -84,7 +95,6 @@ async def _stream_prompt(agent, prompt: str) -> None:
                     }
                 )
     except asyncio.CancelledError:
-        cancel_question_future()
         _emit({"type": "cancelled"})
     except Exception as error:
         logger.error("Stream error: %s", error, exc_info=True)
@@ -134,6 +144,12 @@ async def _handle_message(agent, payload: dict[str, Any], config: dict[str, Any]
                 "cwd": os.getcwd(),
             }
         )
+        return True
+
+    if message_type == "load_history":
+        db_path = resolve_checkpoint_path(config)
+        messages = load_thread_messages(db_path, thread_id=agent.thread_id)
+        _emit({"type": "history", "messages": messages})
         return True
 
     if message_type == "exit":
@@ -195,11 +211,6 @@ async def main() -> int:
         if message_type == "cancel":
             if _stream_task and not _stream_task.done():
                 _stream_task.cancel()
-            continue
-
-        # ── Answer: resolve pending ask_user_question Future ─────
-        if message_type == "answer":
-            resolve_question_future(payload.get("answers", {}))
             continue
 
         # ── Other messages: handle synchronously ──────────────────

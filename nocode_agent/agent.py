@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -36,6 +37,32 @@ from nocode_agent.subagents import get_builtin_agents, build_readonly_tool_names
 from nocode_agent.tools import build_core_tools, build_readonly_tools, make_agent_tool
 
 logger = logging.getLogger(__name__)
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    """判断是否为可重试的 API 错误（429、5xx、网络超时等）。"""
+    exc_str = str(exc).lower()
+    # HTTP 429 rate limit
+    if "429" in exc_str or "rate" in exc_str or "速率" in exc_str:
+        return True
+    # HTTP 5xx server errors
+    if any(code in exc_str for code in ("500", "502", "503", "504")):
+        return True
+    # Connection / timeout errors
+    if isinstance(exc, (ConnectionError, TimeoutError, asyncio.TimeoutError)):
+        return True
+    for klass in (
+        "ConnectionError",
+        "TimeoutError",
+        "APIConnectionError",
+        "APITimeoutError",
+        "RateLimitError",
+        "InternalServerError",
+        "ServiceUnavailableError",
+    ):
+        if klass in type(exc).__name__:
+            return True
+    return False
 
 
 def _render_tool_output(content) -> str:
@@ -106,76 +133,96 @@ class MainAgent:
         await self._checkpointer.delete_thread(self._thread_id)
 
     async def chat(self, user_input: str):
-        """异步生成器，yield (event_type, *data)。"""
+        """异步生成器，yield (event_type, *data)。包含自动重试。"""
         logger.debug("chat() called: thread=%s, input=%s", self._thread_id[:20], user_input[:200])
         await self._checkpointer.ensure_setup()
         config = {"configurable": {"thread_id": self._thread_id}}
 
-        async for chunk in self._agent.astream(
-            {"messages": [{"role": "user", "content": user_input}]},
-            config=config,
-            stream_mode=["messages", "updates"],
-            version="v2",
-        ):
-            chunk_type = chunk.get("type")
+        max_retries = 5
+        base_delay = 2.0
 
-            if chunk_type == "messages":
-                token, metadata = chunk["data"]
-                if metadata.get("langgraph_node") != "model":
-                    continue
-                if isinstance(token, AIMessageChunk) and token.text:
-                    yield ("text", token.text)
-                continue
+        for attempt in range(max_retries + 1):
+            try:
+                async for chunk in self._agent.astream(
+                    {"messages": [{"role": "user", "content": user_input}]},
+                    config=config,
+                    stream_mode=["messages", "updates"],
+                    version="v2",
+                ):
+                    chunk_type = chunk.get("type")
 
-            if chunk_type != "updates":
-                continue
+                    if chunk_type == "messages":
+                        token, metadata = chunk["data"]
+                        if metadata.get("langgraph_node") != "model":
+                            continue
+                        if isinstance(token, AIMessageChunk) and token.text:
+                            yield ("text", token.text)
+                        continue
 
-            for step, data in chunk["data"].items():
-                if not isinstance(data, dict):
-                    continue
-                new_messages = data.get("messages", [])
-                if not isinstance(new_messages, list):
-                    continue
+                    if chunk_type != "updates":
+                        continue
 
-                if step == "model":
-                    for message in new_messages:
-                        if isinstance(message, AIMessage):
-                            for tool_call in message.tool_calls:
-                                # 通知 SM extractor 有工具调用
-                                if self._sm_extractor:
-                                    self._sm_extractor.notify_tool_call()
-                                yield (
-                                    "tool_start",
-                                    tool_call["name"],
-                                    tool_call.get("args", {}),
-                                    tool_call.get("id", ""),
-                                )
-                elif step == "tools":
-                    for message in new_messages:
-                        if isinstance(message, ToolMessage):
-                            # 追踪 read 工具的文件读取
-                            if message.name == "read" and self._file_tracker:
-                                self._file_tracker.record_from_tool_message(message)
+                    for step, data in chunk["data"].items():
+                        if not isinstance(data, dict):
+                            continue
+                        new_messages = data.get("messages", [])
+                        if not isinstance(new_messages, list):
+                            continue
 
-                            yield (
-                                "tool_end",
-                                message.name or "tool",
-                                _render_tool_output(message.content),
-                                getattr(message, "tool_call_id", ""),
-                            )
+                        if step == "model":
+                            for message in new_messages:
+                                if isinstance(message, AIMessage):
+                                    for tool_call in message.tool_calls:
+                                        # 通知 SM extractor 有工具调用
+                                        if self._sm_extractor:
+                                            self._sm_extractor.notify_tool_call()
+                                        yield (
+                                            "tool_start",
+                                            tool_call["name"],
+                                            tool_call.get("args", {}),
+                                            tool_call.get("id", ""),
+                                        )
+                        elif step == "tools":
+                            for message in new_messages:
+                                if isinstance(message, ToolMessage):
+                                    # 追踪 read 工具的文件读取
+                                    if message.name == "read" and self._file_tracker:
+                                        self._file_tracker.record_from_tool_message(message)
 
-                # ── Auto-Compact + SM 提取（每轮结束后） ──────────
-                if step == "model":
-                    if self._auto_compactor:
-                        compacted = await self._maybe_auto_compact(config)
-                        if compacted:
-                            yield compacted
+                                    yield (
+                                        "tool_end",
+                                        message.name or "tool",
+                                        _render_tool_output(message.content),
+                                        getattr(message, "tool_call_id", ""),
+                                    )
 
-                    # Session Memory 提取（fire-and-forget）
-                    if self._sm_extractor:
-                        state = await self._agent.aget_state(config)
-                        msgs = state.values.get("messages", [])
-                        await self._sm_extractor.maybe_extract(msgs)
+                        # ── Auto-Compact + SM 提取（每轮结束后） ──
+                        if step == "model":
+                            if self._auto_compactor:
+                                compacted = await self._maybe_auto_compact(config)
+                                if compacted:
+                                    yield compacted
+
+                            # Session Memory 提取（fire-and-forget）
+                            if self._sm_extractor:
+                                state = await self._agent.aget_state(config)
+                                msgs = state.values.get("messages", [])
+                                await self._sm_extractor.maybe_extract(msgs)
+
+                # 流正常结束，退出重试循环
+                return
+            except Exception as exc:
+                is_retryable = _is_retryable_error(exc)
+                if not is_retryable or attempt >= max_retries:
+                    raise
+
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    "请求失败 (attempt %d/%d): %s，%.1f 秒后重试...",
+                    attempt + 1, max_retries, exc, delay,
+                )
+                yield ("retry", str(exc), attempt + 1, max_retries, delay)
+                await asyncio.sleep(delay)
 
     async def _maybe_auto_compact(self, config: dict) -> tuple | None:
         """检查并执行 auto-compact（如果需要）。返回事件元组或 None。"""
@@ -288,6 +335,7 @@ def _build_model(
         base_url=base_url,
         temperature=temperature,
         max_tokens=max_tokens,
+        max_retries=6,
     )
 
 
@@ -457,8 +505,6 @@ async def create_mainagent(
     logger.info("Loaded %d MCP tools, %d core tools, %d skill tools", len(mcp_tools), len(core_tools), len(skill_tools))
 
     # ── 创建多类型子代理 ────────────────────────────────────
-    subagent_defs = get_builtin_agents()
-
     # general-purpose：拥有全部核心工具（可读写）
     general_purpose_agent = create_agent(
         model=subagent_llm,
