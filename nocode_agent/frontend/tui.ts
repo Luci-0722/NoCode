@@ -2132,8 +2132,16 @@ class TypeScriptTui {
       ? 0
       : this.visibleLength(wrappedBeforeCursor[wrappedBeforeCursor.length - 1]);
     const promptPrefix = cursorLine === 0 ? 2 : 2;
+    
+    // 修复光标位置：如果光标在行尾，应该显示在文本后面而不是文本上
+    let finalCursorCol = cursorColBase;
+    if (this.cursorCol === currentLine.length) {
+      // 光标在行尾，显示在文本后面
+      finalCursorCol += 1;
+    }
+    
     const row = promptStartRow + visualRowOffset + cursorLine;
-    const col = promptPrefix + cursorColBase + 1;
+    const col = promptPrefix + finalCursorCol;
     process.stdout.write(`\x1b[${row};${Math.max(1, col)}H`);
   }
 
