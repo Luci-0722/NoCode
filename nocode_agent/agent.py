@@ -16,6 +16,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from nocode_agent.compression import (
     AutoCompactor,
+    CompressionLifecycleMiddleware,
     CompressionConfig,
     FileReadTracker,
     MicrocompactMiddleware,
@@ -128,18 +129,12 @@ class MainAgent:
         thread_id: str | None = None,
         model_name: str = "",
         subagent_model_name: str = "",
-        auto_compactor: AutoCompactor | None = None,
-        file_read_tracker: FileReadTracker | None = None,
-        sm_extractor: SessionMemoryExtractor | None = None,
     ):
         self._agent = agent
         self._checkpointer = checkpointer
         self._thread_id = thread_id or self._new_thread_id()
         self._model_name = model_name
         self._subagent_model_name = subagent_model_name
-        self._auto_compactor = auto_compactor
-        self._file_tracker = file_read_tracker or FileReadTracker()
-        self._sm_extractor = sm_extractor
 
     @staticmethod
     def _new_thread_id() -> str:
@@ -251,9 +246,6 @@ class MainAgent:
                                             )
                                         continue
                                     for tool_call in message.tool_calls:
-                                        # 通知 SM extractor 有工具调用
-                                        if self._sm_extractor:
-                                            self._sm_extractor.notify_tool_call()
                                         yield (
                                             "tool_start",
                                             tool_call["name"],
@@ -280,10 +272,6 @@ class MainAgent:
                                             },
                                         )
                                         continue
-                                    # 追踪 read 工具的文件读取
-                                    if message.name == "read" and self._file_tracker:
-                                        self._file_tracker.record_from_tool_message(message)
-
                                     tool_call_id = getattr(message, "tool_call_id", "")
                                     if (message.name or "") == "delegate_code":
                                         finished_keys = [
@@ -314,19 +302,6 @@ class MainAgent:
                                         tool_call_id,
                                     )
 
-                        # ── Auto-Compact + SM 提取（每轮结束后） ──
-                        if step == "model":
-                            if self._auto_compactor:
-                                compacted = await self._maybe_auto_compact(config)
-                                if compacted:
-                                    yield compacted
-
-                            # Session Memory 提取（fire-and-forget）
-                            if self._sm_extractor:
-                                state = await self._agent.aget_state(config)
-                                msgs = state.values.get("messages", [])
-                                await self._sm_extractor.maybe_extract(msgs)
-
                 # 流正常结束，退出重试循环
                 return
             except Exception as exc:
@@ -341,50 +316,6 @@ class MainAgent:
                 )
                 yield ("retry", str(exc), attempt + 1, max_retries, delay)
                 await asyncio.sleep(delay)
-
-    async def _maybe_auto_compact(self, config: dict) -> tuple | None:
-        """检查并执行 auto-compact（如果需要）。返回事件元组或 None。"""
-        try:
-            # 从 checkpointer 读取当前消息
-            state = await self._agent.aget_state(config)
-            messages = state.values.get("messages", [])
-
-            if not self._auto_compactor.should_trigger(messages):
-                return None
-
-            logger.info("Auto-compact triggered, generating summary...")
-            result = await self._auto_compactor.compact(messages)
-
-            if result is None:
-                logger.warning("Auto-compact failed, will retry next turn")
-                return None
-
-            logger.info(
-                "Auto-compact completed: %d → %d tokens (%d files restored)",
-                result.pre_tokens,
-                result.post_tokens,
-                result.files_restored,
-            )
-
-            # 压缩成功后清空 FileStateCache
-            # 原因：上下文已被压缩，LLM 不再拥有之前读取的文件内容。
-            # 如果不清空，再次 read 会返回 FILE_UNCHANGED_STUB 跳过内容，
-            # 导致 LLM 在压缩后丢失文件上下文。
-            from nocode_agent.file_state import get_file_state_cache
-            get_file_state_cache().clear()
-
-            # 用压缩后的消息替换当前状态
-            await self._agent.aupdate_state(
-                config,
-                {"messages": result.messages},
-                as_node="model",
-            )
-
-            return ("compact", result.pre_tokens, result.post_tokens)
-
-        except Exception as e:
-            logger.error("Auto-compact error: %s", e)
-            return None
 
 
 # 已知模型的上下文窗口大小
@@ -432,12 +363,27 @@ def _resolve_context_window(model: str) -> int:
     return 128_000  # 默认值
 
 
-def _build_middleware(compression: dict | None, context_window: int = 128_000):
-    if not compression:
-        return []
+def _build_middleware(
+    compression: dict | None,
+    context_window: int = 128_000,
+    auto_compactor: AutoCompactor | None = None,
+    sm_extractor: SessionMemoryExtractor | None = None,
+):
+    middleware: list[Any] = []
 
-    config = CompressionConfig.from_yaml(compression, context_window=context_window)
-    return [MicrocompactMiddleware(config).as_langchain_middleware()]
+    if compression:
+        config = CompressionConfig.from_yaml(compression, context_window=context_window)
+        middleware.append(MicrocompactMiddleware(config).as_langchain_middleware())
+
+    if auto_compactor or sm_extractor:
+        middleware.append(
+            CompressionLifecycleMiddleware(
+                auto_compactor=auto_compactor,
+                sm_extractor=sm_extractor,
+            )
+        )
+
+    return middleware
 
 
 def _build_model(
@@ -556,7 +502,6 @@ async def create_mainagent(
         model, base_url, max_tokens, temperature,
     )
     context_window = _resolve_context_window(model)
-    middleware = _build_middleware(compression, context_window=context_window)
     checkpointer = CheckpointerManager(resolve_checkpoint_path(persistence_config))
     saver = checkpointer.get()
 
@@ -612,6 +557,13 @@ async def create_mainagent(
             file_tracker=file_tracker,
             sm_extractor=sm_extractor,
         )
+
+    middleware = _build_middleware(
+        compression,
+        context_window=context_window,
+        auto_compactor=auto_compactor,
+        sm_extractor=sm_extractor,
+    )
 
     core_tools = build_core_tools()
     readonly_tools = build_readonly_tools()
@@ -684,7 +636,4 @@ async def create_mainagent(
         thread_id=resolved_thread_id,
         model_name=model,
         subagent_model_name=subagent_model or model,
-        auto_compactor=auto_compactor,
-        file_read_tracker=file_tracker,
-        sm_extractor=sm_extractor,
     )

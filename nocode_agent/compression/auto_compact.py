@@ -132,6 +132,11 @@ class AutoCompactor:
         return self._consecutive_failures
 
     @property
+    def file_tracker(self) -> FileReadTracker:
+        """暴露文件读取追踪器，供 middleware 在工具调用后更新。"""
+        return self._file_tracker
+
+    @property
     def threshold(self) -> int:
         """触发 auto-compact 的 token 阈值。"""
         effective = self._context_window - self._config.reserved_output_tokens

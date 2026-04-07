@@ -22,6 +22,7 @@ from nocode_agent.compression.auto_compact import (
     CompactResult,
     FileReadTracker,
 )
+from nocode_agent.compression.lifecycle import CompressionLifecycleMiddleware
 from nocode_agent.compression.session_memory import (
     SessionMemoryExtractor,
     SessionMemoryCompactor,
@@ -46,4 +47,5 @@ __all__ = [
     "AutoCompactor",
     "CompactResult",
     "FileReadTracker",
+    "CompressionLifecycleMiddleware",
 ]
