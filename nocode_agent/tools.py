@@ -4,20 +4,49 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import hashlib
 import json
+import logging
+import os
 import re
+import shutil
 from html import unescape
 from urllib.parse import quote, urljoin
 from urllib.request import Request, urlopen
 from pathlib import Path
 from uuid import uuid4
+from typing import Any
 
 from langchain.tools import tool
 from langchain_core.messages import AIMessage, BaseMessage
 from pydantic import BaseModel, Field
 
+logger = logging.getLogger(__name__)
+
 _MAX_OUTPUT = 12_000
 _TODO_STORE: list[str] = []
+
+# ── Shared state for ask_user_question pause/resume ──
+_pending_question_future: asyncio.Future | None = None
+
+
+def set_question_future(future: asyncio.Future) -> None:
+    global _pending_question_future
+    _pending_question_future = future
+
+
+def resolve_question_future(answer: dict) -> None:
+    global _pending_question_future
+    if _pending_question_future is not None and not _pending_question_future.done():
+        _pending_question_future.set_result(answer)
+    _pending_question_future = None
+
+
+def cancel_question_future() -> None:
+    global _pending_question_future
+    if _pending_question_future is not None and not _pending_question_future.done():
+        _pending_question_future.cancel()
+    _pending_question_future = None
 
 
 def _workspace_root() -> Path:
@@ -61,15 +90,44 @@ def _extract_last_ai_text(messages: list[BaseMessage]) -> str:
 class ReadInput(BaseModel):
     file_path: str = Field(description="工作区内的文件路径，支持相对路径。")
     offset: int = Field(default=1, ge=1, description="起始行号，从 1 开始。")
-    limit: int = Field(default=400, ge=1, le=4000, description="最多读取多少行。")
+    limit: int = Field(default=2000, ge=1, le=4000, description="最多读取多少行。")
+
+
+_FILE_UNCHANGED_STUB = (
+    "文件自上次读取后未变更。之前的读取内容仍然有效，无需重复读取。"
+)
 
 
 @tool("read", args_schema=ReadInput)
-def read_file(file_path: str, offset: int = 1, limit: int = 400) -> str:
+def read_file(file_path: str, offset: int = 1, limit: int = 2000) -> str:
     """读取文件内容并返回带行号的文本。"""
+    from nocode_agent.file_state import get_file_state_cache
+
     try:
         path = _resolve_path(file_path)
-        lines = path.read_text(encoding="utf-8").splitlines()
+    except ValueError as error:
+        return f"错误：{error}"
+
+    # ── 未变更检测：相同路径 + 相同范围 + mtime 未变 → 返回 stub ──
+    cache = get_file_state_cache()
+    state = cache.get(path)
+    if state is not None and state.is_mtime_valid(path):
+        # 如果之前读的是完整文件（offset=1, limit 覆盖全部行），且这次请求的范围相同或更小
+        # 直接返回 stub 节省 token
+        try:
+            total_lines = len(path.read_text(encoding="utf-8").splitlines())
+            start = offset - 1
+            end = min(total_lines, start + limit)
+            is_full_read = (start == 0 and end >= total_lines)
+            if is_full_read:
+                return _FILE_UNCHANGED_STUB
+        except Exception:
+            pass  # 读取失败就继续正常读取
+
+    # ── 正常读取 ─────────────────────────────────────────────────
+    try:
+        content = path.read_text(encoding="utf-8")
+        lines = content.splitlines()
     except FileNotFoundError:
         return f"错误：文件不存在: {file_path}"
     except Exception as error:
@@ -84,6 +142,10 @@ def read_file(file_path: str, offset: int = 1, limit: int = 400) -> str:
     suffix = ""
     if start > 0 or end < len(lines):
         suffix = f"\n\n[显示第 {offset}-{end} 行，共 {len(lines)} 行]"
+
+    # 写入缓存
+    cache.set(path, content)
+
     return _trim_output("\n".join(rendered) + suffix)
 
 
@@ -94,11 +156,29 @@ class WriteInput(BaseModel):
 
 @tool("write", args_schema=WriteInput)
 def write_file(file_path: str, content: str) -> str:
-    """覆盖写入文件。"""
+    """覆盖写入文件。如果是已有文件，必须先使用 read 工具读取过才能写入。"""
+    from nocode_agent.file_state import get_file_state_cache
+
+    logger.info("write: %s (%d chars)", file_path, len(content))
     try:
         path = _resolve_path(file_path)
+    except ValueError as error:
+        return f"错误：{error}"
+
+    # 前置验证：现有文件必须先 read
+    cache = get_file_state_cache()
+    if path.exists():
+        if not cache.has_valid_read(path):
+            return (
+                "错误：必须先使用 read 工具读取此文件，然后才能写入。"
+                "（此检查防止在不了解文件内容的情况下意外覆盖。）"
+            )
+
+    try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+        # 写入成功后更新缓存
+        cache.set(path, content)
         return f"已写入 {path}"
     except Exception as error:
         return f"错误：写入失败: {error}"
@@ -113,9 +193,28 @@ class EditInput(BaseModel):
 
 @tool("edit", args_schema=EditInput)
 def edit_file(file_path: str, old_text: str, new_text: str, replace_all: bool = False) -> str:
-    """基于精确文本匹配编辑文件。"""
+    """基于精确文本匹配编辑文件。必须先使用 read 工具读取此文件。"""
+    from nocode_agent.file_state import get_file_state_cache
+
+    logger.info("edit: %s (replace_all=%s)", file_path, replace_all)
     try:
         path = _resolve_path(file_path)
+    except ValueError as error:
+        return f"错误：{error}"
+
+    # 前置验证：必须先 read，且文件自读取后未被外部修改
+    cache = get_file_state_cache()
+    if not cache.has_valid_read(path):
+        if cache.get(path) is None:
+            return (
+                "错误：必须先使用 read 工具读取此文件，然后才能编辑。"
+                "（此检查防止在不了解文件内容的情况下意外修改。）"
+            )
+        return (
+            "错误：文件自上次读取后已被修改（mtime 不匹配），请重新使用 read 读取最新内容。"
+        )
+
+    try:
         content = path.read_text(encoding="utf-8")
     except Exception as error:
         return f"错误：读取文件失败: {error}"
@@ -128,6 +227,8 @@ def edit_file(file_path: str, old_text: str, new_text: str, replace_all: bool = 
 
     updated = content.replace(old_text, new_text) if replace_all else content.replace(old_text, new_text, 1)
     path.write_text(updated, encoding="utf-8")
+    # 编辑成功后更新缓存
+    cache.set(path, updated)
     return f"已更新 {path}，替换 {occurrences if replace_all else 1} 处。"
 
 
@@ -137,9 +238,15 @@ class GlobInput(BaseModel):
 
 @tool("glob", args_schema=GlobInput)
 def glob_search(pattern: str) -> str:
-    """在工作区内执行 glob 搜索。"""
+    """在工作区内执行 glob 搜索，返回按修改时间降序排列的文件路径（最近修改的排在前面）。"""
     root = _workspace_root()
-    matches = sorted(str(path.relative_to(root)) for path in root.glob(pattern))
+    try:
+        paths = [p for p in root.glob(pattern) if not p.is_dir()]
+    except Exception:
+        paths = []
+    # 按修改时间降序排列（最近修改的文件排在前面）
+    paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    matches = [str(p.relative_to(root)) for p in paths]
     if not matches:
         return "未找到匹配文件。"
     return _trim_output("\n".join(matches))
@@ -177,40 +284,244 @@ class GrepInput(BaseModel):
     pattern: str = Field(description="正则或普通文本模式。")
     path: str = Field(default=".", description="搜索起点目录。")
     file_glob: str = Field(default="*", description="文件筛选 glob，例如 `*.py`。")
+    output_mode: str = Field(
+        default="content",
+        description=(
+            "输出模式："
+            "content（默认，显示匹配行及行号）、"
+            "files_with_matches（仅显示包含匹配的文件路径）、"
+            "count（显示每个文件的匹配计数）。"
+        ),
+    )
+    context_lines: int = Field(
+        default=0, ge=0, le=10,
+        description="上下文行数（前后各N行），仅 content 模式有效。",
+    )
     max_matches: int = Field(default=200, ge=1, le=2000, description="最多返回多少条结果。")
 
 
-@tool("grep", args_schema=GrepInput)
-def grep_search(pattern: str, path: str = ".", file_glob: str = "*", max_matches: int = 200) -> str:
-    """在工作区内搜索文本。"""
+# ── rg 可用性检测（启动时检查一次）────────────────────────────────
+_rg_available: bool | None = None
+
+
+def _is_rg_available() -> bool:
+    global _rg_available
+    if _rg_available is None:
+        _rg_available = shutil.which("rg") is not None
+    return _rg_available
+
+
+def _grep_with_rg(
+    pattern: str,
+    base: Path,
+    file_glob: str,
+    output_mode: str,
+    context_lines: int,
+    max_matches: int,
+) -> str | None:
+    """用 ripgrep 执行搜索。返回结果字符串，或 None 表示 rg 不可用/出错。"""
+    if not _is_rg_available():
+        return None
+
+    cmd = ["rg", "--no-config", "--no-ignore-vcs"]
+    workspace = _workspace_root()
+    cwd = str(base)
+
+    if output_mode == "files_with_matches":
+        cmd += ["--files-with-matches", "--max-count", str(max_matches)]
+    elif output_mode == "count":
+        cmd += ["--count", "--max-count", str(max_matches)]
+    else:
+        # content 模式
+        cmd += ["--line-number", "--max-count", str(max_matches)]
+        if context_lines > 0:
+            cmd += [f"--context={context_lines}"]
+
+    # glob 过滤
+    if file_glob and file_glob != "*":
+        cmd += ["--glob", file_glob]
+
+    cmd.append(pattern)
+    cmd.append(cwd)
+
     try:
-        base = _resolve_path(path)
+        proc = asyncio.run(_run_rg(cmd))
+    except Exception:
+        return None
+
+    if not proc:
+        return None
+
+    stdout, stderr, returncode = proc
+    # rg 返回 1 表示无匹配，返回 2+ 表示错误
+    if returncode == 1:
+        return "未找到匹配内容。"
+    if returncode >= 2:
+        # rg 出错，fallback 到 Python
+        return None
+
+    text = stdout.decode("utf-8", errors="replace").strip()
+    if not text:
+        return "未找到匹配内容。"
+
+    # content 模式下把绝对路径转为相对路径
+    if output_mode == "content":
+        lines = text.splitlines()
+        converted = []
+        for line in lines:
+            # rg 输出格式: /abs/path/to/file:line_no:content 或 /abs/path/to/file-line_no-content (context)
+            for prefix_sep in [":", "-"]:
+                idx = line.find(prefix_sep)
+                if idx > 0:
+                    abs_path = line[:idx]
+                    try:
+                        rel = str(Path(abs_path).relative_to(workspace))
+                    except ValueError:
+                        rel = abs_path
+                    converted.append(rel + line[idx:])
+                    break
+            else:
+                converted.append(line)
+        text = "\n".join(converted)
+    elif output_mode in ("files_with_matches", "count"):
+        # 把绝对路径转为相对路径
+        lines = text.splitlines()
+        converted = []
+        for line in lines:
+            for sep in [":", "\n"]:
+                idx = line.find(sep)
+                if idx > 0:
+                    abs_path = line[:idx]
+                    try:
+                        rel = str(Path(abs_path).relative_to(workspace))
+                    except ValueError:
+                        rel = abs_path
+                    converted.append(rel + line[idx:])
+                    break
+            else:
+                try:
+                    converted.append(str(Path(line).relative_to(workspace)))
+                except ValueError:
+                    converted.append(line)
+        text = "\n".join(converted)
+
+    return _trim_output(text)
+
+
+async def _run_rg(cmd: list[str]) -> tuple[bytes, bytes, int] | None:
+    """异步运行 rg 命令。"""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        return stdout, stderr, proc.returncode or 0
+    except Exception:
+        return None
+
+
+def _grep_with_python(
+    pattern: str,
+    base: Path,
+    file_glob: str,
+    output_mode: str,
+    context_lines: int,
+    max_matches: int,
+) -> str:
+    """纯 Python 的 grep 实现（rg 不可用时的 fallback）。"""
+    try:
         regex = re.compile(pattern)
     except re.error as error:
         return f"错误：无效正则: {error}"
-    except Exception as error:
-        return f"错误：路径无效: {error}"
 
+    workspace = _workspace_root()
     results: list[str] = []
+
     for file in sorted(base.rglob("*")):
         if not file.is_file():
             continue
         if not fnmatch.fnmatch(file.name, file_glob):
             continue
         try:
-            for line_no, line in enumerate(file.read_text(encoding="utf-8").splitlines(), start=1):
+            lines = file.read_text(encoding="utf-8").splitlines()
+        except (UnicodeDecodeError, Exception):
+            continue
+
+        rel_path = str(file.relative_to(workspace))
+
+        if output_mode == "files_with_matches":
+            for line in lines:
                 if regex.search(line):
-                    results.append(f"{file.relative_to(_workspace_root())}:{line_no}: {line}")
-                    if len(results) >= max_matches:
-                        return _trim_output("\n".join(results) + f"\n\n[结果已截断，最多 {max_matches} 条]")
-        except UnicodeDecodeError:
+                    results.append(rel_path)
+                    break
+            if len(results) >= max_matches:
+                break
             continue
-        except Exception:
+
+        if output_mode == "count":
+            count = sum(1 for line in lines if regex.search(line))
+            if count > 0:
+                results.append(f"{rel_path}:{count}")
+            if len(results) >= max_matches:
+                break
             continue
+
+        # content 模式
+        for line_no, line in enumerate(lines, start=1):
+            if regex.search(line):
+                if context_lines > 0:
+                    # 带上下文行
+                    start = max(0, line_no - 1 - context_lines)
+                    end = min(len(lines), line_no + context_lines)
+                    snippet_lines = []
+                    for i in range(start, end):
+                        prefix = ">" if i == line_no - 1 else " "
+                        snippet_lines.append(f"{prefix}{i + 1}:{lines[i]}")
+                    results.append(f"{rel_path}-{line_no - context_lines}-{line_no + context_lines}:")
+                    results.extend(f"  {l}" for l in snippet_lines)
+                else:
+                    results.append(f"{rel_path}:{line_no}: {line}")
+                if len(results) >= max_matches:
+                    return _trim_output("\n".join(results) + f"\n\n[结果已截断，最多 {max_matches} 条]")
 
     if not results:
         return "未找到匹配内容。"
     return _trim_output("\n".join(results))
+
+
+@tool("grep", args_schema=GrepInput)
+def grep_search(
+    pattern: str,
+    path: str = ".",
+    file_glob: str = "*",
+    output_mode: str = "content",
+    context_lines: int = 0,
+    max_matches: int = 200,
+) -> str:
+    """在工作区内搜索文本。优先使用 ripgrep (rg)，不可用时使用 Python 实现。
+
+支持三种输出模式：
+- content（默认）：显示匹配的文件名:行号: 内容
+- files_with_matches：仅显示包含匹配的文件路径
+- count：显示每个文件的匹配计数
+"""
+    try:
+        base = _resolve_path(path)
+    except Exception as error:
+        return f"错误：路径无效: {error}"
+
+    if output_mode not in ("content", "files_with_matches", "count"):
+        return "错误：output_mode 必须是 content、files_with_matches 或 count。"
+
+    # 优先尝试 rg
+    result = _grep_with_rg(pattern, base, file_glob, output_mode, context_lines, max_matches)
+    if result is not None:
+        return result
+
+    # fallback 到 Python
+    return _grep_with_python(pattern, base, file_glob, output_mode, context_lines, max_matches)
 
 
 class BashInput(BaseModel):
@@ -221,6 +532,7 @@ class BashInput(BaseModel):
 @tool("bash", args_schema=BashInput)
 async def bash(command: str, timeout: int = 30) -> str:
     """在当前工作区执行 shell 命令并返回输出。"""
+    logger.info("bash: %s (timeout=%ds)", command[:200], timeout)
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
@@ -276,6 +588,7 @@ def _strip_html(text: str) -> str:
 @tool("web_search", args_schema=WebSearchInput)
 def web_search(query: str, max_results: int = 5) -> str:
     """执行网页搜索并返回结果摘要。"""
+    logger.info("web_search: %s (max=%d)", query, max_results)
     search_url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
     try:
         html = _http_get(search_url)
@@ -325,6 +638,49 @@ def web_fetch(url: str, max_chars: int = 5000) -> str:
     return _trim_output(text[:max_chars])
 
 
+class AskUserQuestionInput(BaseModel):
+    questions: list[dict] = Field(
+        description=(
+            "要问用户的问题列表。每个问题是一个 dict，包含："
+            "question(必填，问题文本)、header(可选，短标签如 'Auth method')、"
+            "options(可选，2-4个选项的list，每个选项有 label 和 description)、"
+            "multiSelect(可选，bool，是否可多选)。"
+        )
+    )
+
+
+@tool("ask_user_question", args_schema=AskUserQuestionInput)
+async def ask_user_question(questions: list[dict]) -> str:
+    """向用户提出结构化问题以澄清需求或选择方案。
+
+    只在需要用户输入来消除歧义时使用。不要用于：
+    - 确认计划或请求许可（直接执行即可）
+    - 询问"这个方案可以吗？"（直接开始做）
+    - 收集本可以从代码中推断的信息（先搜索代码）
+    """
+    if not questions:
+        return "错误：问题列表不能为空。"
+
+    # ── Pause and wait for user input via Future ──
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future = loop.create_future()
+    set_question_future(future)
+
+    try:
+        answer = await future
+    except asyncio.CancelledError:
+        return json.dumps({
+            "type": "ask_user_question_cancelled",
+            "reason": "stream was cancelled",
+        }, ensure_ascii=False)
+
+    # answer: {"answers": [{"question_index": 0, "selected": ["label"]}]}
+    return json.dumps({
+        "type": "ask_user_question_answer",
+        "answers": answer.get("answers", []),
+    }, ensure_ascii=False)
+
+
 class TodoInput(BaseModel):
     todos: list[str] = Field(description="待办事项列表。")
 
@@ -348,6 +704,7 @@ def todo_read() -> str:
 
 
 def build_core_tools() -> list:
+    """返回全部 12 个核心工具（含 ask_user_question）。"""
     return [
         read_file,
         write_file,
@@ -358,13 +715,47 @@ def build_core_tools() -> list:
         bash,
         web_search,
         web_fetch,
+        ask_user_question,
         todo_write,
         todo_read,
     ]
 
 
-def make_subagent_tool(subagent, name: str = "delegate_code"):
-    class DelegateInput(BaseModel):
+def build_readonly_tools() -> list:
+    """返回只读工具集（排除 write/edit/delegate_code），供 Explore/Plan/verification 子代理使用。"""
+    all_tools = build_core_tools()
+    blocked = {"write", "edit"}
+    return [t for t in all_tools if t.name not in blocked]
+
+
+# ── 子代理类型描述（注入到工具 description 中） ──────────────────
+_SUBAGENT_TYPE_DESCRIPTION = (
+    "子代理类型。可选值：\n"
+    "- general-purpose（默认）：通用编码代理，拥有所有工具，可读写文件\n"
+    "- Explore：快速搜索代理，只读，擅长文件搜索和代码分析。"
+    "调用时在 prompt 中指定彻底程度：quick/medium/very thorough\n"
+    "- Plan：架构规划代理，只读，擅长设计实施方案和识别关键文件\n"
+    "- verification：对抗性验证代理，只读，尝试找出 bug 和遗漏"
+)
+
+
+def make_agent_tool(
+    subagents: dict[str, Any],
+    name: str = "delegate_code",
+) -> Any:
+    """创建多类型子代理委派工具。
+
+    Args:
+        subagents: {agent_type: langchain_agent_instance} 字典。
+            必须包含 "general-purpose" 键。
+        name: 工具名。
+    """
+
+    class AgentInput(BaseModel):
+        subagent_type: str = Field(
+            default="general-purpose",
+            description=_SUBAGENT_TYPE_DESCRIPTION,
+        )
         task: str = Field(description="要委派给子代理的具体任务。")
         context: str = Field(default="", description="补充上下文，可选。")
         thread_id: str = Field(
@@ -372,10 +763,22 @@ def make_subagent_tool(subagent, name: str = "delegate_code"):
             description="可选的子代理会话名；传入相同值会复用同一个子代理线程。",
         )
 
-    @tool(name, args_schema=DelegateInput)
-    async def delegate_code(task: str, context: str = "", thread_id: str = "") -> str:
-        """把复杂编码任务委派给后台子代理执行。"""
+    @tool(name, args_schema=AgentInput)
+    async def delegate_code(
+        subagent_type: str = "general-purpose",
+        task: str = "",
+        context: str = "",
+        thread_id: str = "",
+    ) -> str:
+        """把任务委派给子代理执行。支持多种子代理类型，默认为通用编码代理。"""
+        # 查找子代理实例
+        agent = subagents.get(subagent_type) or subagents.get("general-purpose")
+        if agent is None:
+            return "错误：没有可用的子代理。"
+
         prompt = task.strip()
+        if not prompt:
+            return "错误：task 不能为空。"
         if context.strip():
             prompt = f"任务：{task.strip()}\n\n补充上下文：\n{context.strip()}"
 
@@ -385,7 +788,9 @@ def make_subagent_tool(subagent, name: str = "delegate_code"):
             else f"subagent-{uuid4().hex}"
         )
 
-        result = await subagent.ainvoke(
+        logger.info("delegate_code: type=%s, thread=%s", subagent_type, resolved_thread_id)
+
+        result = await agent.ainvoke(
             {"messages": [{"role": "user", "content": prompt}]},
             config={"configurable": {"thread_id": resolved_thread_id}},
         )
@@ -408,9 +813,11 @@ def dump_tools_manifest() -> str:
             "bash",
             "web_search",
             "web_fetch",
+            "ask_user_question",
             "todo_write",
             "todo_read",
         ],
         "subagent_tool": "delegate_code",
+        "subagent_types": ["general-purpose", "Explore", "Plan", "verification"],
     }
     return json.dumps(manifest, ensure_ascii=False, indent=2)
