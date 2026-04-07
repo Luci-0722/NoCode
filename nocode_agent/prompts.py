@@ -89,6 +89,19 @@ def _render_instruction_files(files: list[ContextFile]) -> str:
     return "\n\n".join(sections)
 
 
+def _build_environment_section(cwd: Path | None = None, *, include_date: bool = True) -> str:
+    """构建环境上下文段，供主代理与子代理复用。"""
+    resolved_cwd = (cwd or Path.cwd()).resolve()
+    items = [
+        "# 环境上下文",
+        f" - 工作目录: {resolved_cwd}",
+    ]
+    if include_date:
+        items.append(f" - 日期: {date.today().isoformat()}")
+    items.append(f" - 平台: {platform.system()} {platform.release()}")
+    return "\n".join(items)
+
+
 # ---------------------------------------------------------------------------
 # Static prompt: process-lifetime constant sections.
 # Mirrors Claude Code's sections *before* SYSTEM_PROMPT_DYNAMIC_BOUNDARY.
@@ -214,15 +227,9 @@ def build_dynamic_prompt(cwd: Path | None = None) -> str:
     Source: claude-code-analysis/src/constants/prompts.ts:491-555 (dynamicSections)
     """
     cwd = (cwd or Path.cwd()).resolve()
-    today = date.today().isoformat()
     files = discover_instruction_files(cwd)
 
-    sections = [
-        "# 环境上下文\n"
-        f" - 工作目录: {cwd}\n"
-        f" - 日期: {today}\n"
-        f" - 平台: {platform.system()} {platform.release()}",
-    ]
+    sections = [_build_environment_section(cwd)]
 
     if files:
         sections.append(_render_instruction_files(files))
@@ -248,19 +255,17 @@ def build_main_system_prompt(cwd: Path | None = None) -> str:
 
 def _build_subagent_shared_notes(cwd: Path | None = None) -> str:
     """构建 Claude Code 风格的子代理共享 Notes 段。"""
-    resolved_cwd = (cwd or Path.cwd()).resolve()
     return "\n".join(
         [
             "Notes:",
+            " - 子代理不继承 AGENTS.md、CLAUDE.md 或其他指令文件内容；如有需要，应直接读取相关文件。",
             " - 代理线程在两次 bash 调用之间会重置 cwd，因此请始终使用绝对路径。",
             " - 在最终回复里，只分享与任务相关的文件路径（必须使用绝对路径，不要用相对路径）。"
             "只有当精确文本本身会影响结论时才贴代码片段，不要复述你只是读过的代码。",
             " - 为了与用户清晰沟通，禁止使用 emoji。",
             " - 不要在工具调用前加冒号。像“让我读一下文件：”这种写法应改成“让我读一下文件。”。",
             "",
-            "# Environment",
-            f" - Working directory: {resolved_cwd}",
-            f" - Platform: {platform.system()} {platform.release()}",
+            _build_environment_section(cwd, include_date=False),
         ]
     )
 
