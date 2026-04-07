@@ -654,6 +654,7 @@ class TypeScriptTui {
       ? (delta > 0 ? 0 : tools.length - 1)
       : Math.max(0, Math.min(tools.length - 1, currentIndex + delta));
     this.selectedToolId = tools[nextIndex]?.id ?? null;
+    this.ensureSelectedToolVisible();
     this.render();
   }
 
@@ -663,7 +664,59 @@ class TypeScriptTui {
       return;
     }
     tool.expanded = !tool.expanded;
+    this.ensureSelectedToolVisible();
     this.render();
+  }
+
+  private ensureSelectedToolVisible(): void {
+    if (this.selectedToolId === null) {
+      return;
+    }
+
+    const width = process.stdout.columns || 120;
+    const { transcriptHeight } = this.getTranscriptLayout(width);
+    const range = this.getToolLineRange(this.selectedToolId, width);
+    if (!range) {
+      return;
+    }
+
+    const blocks = this.buildTranscriptBlocks(width);
+    const maxOffset = Math.max(0, blocks.length - transcriptHeight);
+    const visibleStart = Math.max(0, blocks.length - transcriptHeight - this.scrollOffset);
+    const visibleEnd = visibleStart + transcriptHeight - 1;
+
+    let nextOffset = this.scrollOffset;
+    if (range.start < visibleStart) {
+      nextOffset = Math.max(0, blocks.length - transcriptHeight - range.start);
+    } else if (range.end > visibleEnd) {
+      nextOffset = Math.max(0, blocks.length - transcriptHeight - range.end);
+    }
+
+    this.scrollOffset = Math.max(0, Math.min(maxOffset, nextOffset));
+  }
+
+  private getToolLineRange(toolId: number, width: number): { start: number; end: number } | null {
+    let cursor = 0;
+    for (const entry of this.history) {
+      const entryLines = this.renderHistoryEntry(entry, width);
+      const start = cursor;
+      const end = cursor + Math.max(0, entryLines.length - 1);
+      if (entry.kind === "tool" && entry.id === toolId) {
+        return { start, end };
+      }
+      cursor += entryLines.length + 1;
+    }
+    return null;
+  }
+
+  private getTranscriptLayout(width: number): { transcriptHeight: number } {
+    const height = process.stdout.rows || 40;
+    const headerHeight = this.renderHeader(width).length;
+    const composerHeight = this.renderComposer(width).length;
+    const footerHeight = this.renderFooter(width).length;
+    return {
+      transcriptHeight: Math.max(8, height - headerHeight - composerHeight - footerHeight),
+    };
   }
 
   // ── Session picker helpers ────────────────────────────────
@@ -1814,11 +1867,7 @@ class TypeScriptTui {
 
   private scrollTranscript(delta: number): void {
     const width = process.stdout.columns || 120;
-    const height = process.stdout.rows || 40;
-    const headerHeight = this.renderHeader(width).length;
-    const composerHeight = this.renderComposer(width).length;
-    const footerHeight = this.renderFooter(width).length;
-    const transcriptHeight = Math.max(8, height - headerHeight - composerHeight - footerHeight);
+    const { transcriptHeight } = this.getTranscriptLayout(width);
     const maxOffset = Math.max(0, this.buildTranscriptBlocks(width).length - transcriptHeight);
     const nextOffset = Math.max(0, Math.min(maxOffset, this.scrollOffset + delta));
     if (nextOffset !== this.scrollOffset) {
