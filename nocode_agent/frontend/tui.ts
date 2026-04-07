@@ -1880,15 +1880,16 @@ class TypeScriptTui {
       if (endCol <= startCol) {
         return line;
       }
-      return this.highlightAnsiRange(line, startCol, endCol);
+      return this.highlightPlainRange(plain, startCol, endCol);
     });
   }
 
-  private highlightAnsiRange(line: string, startCol: number, endCol: number): string {
-    const [before, afterStart] = this.sliceByWidthAnsi(line, startCol);
-    const [selected, after] = this.sliceByWidthAnsi(afterStart, Math.max(0, endCol - startCol));
-    const highlighted = `${COLOR.selectedBg}${COLOR.selectedText}${this.stripAnsi(selected)}${COLOR.reset}`;
-    return `${before}${highlighted}${after}`;
+  private highlightPlainRange(text: string, startCol: number, endCol: number): string {
+    const before = this.sliceByWidth(text, startCol);
+    const afterStart = text.slice(before.length);
+    const selected = this.sliceByWidth(afterStart, Math.max(0, endCol - startCol));
+    const after = afterStart.slice(selected.length);
+    return `${before}${COLOR.selectedBg}${COLOR.selectedText}${selected}${COLOR.reset}${after}`;
   }
 
   private translateMouseToSelectionPoint(col: number, row: number): { row: number; col: number } | null {
