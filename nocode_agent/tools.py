@@ -15,12 +15,12 @@ from urllib.parse import quote, urljoin
 from urllib.request import Request, urlopen
 from pathlib import Path
 from uuid import uuid4
-from typing import Any
+from typing import Annotated, Any, Callable
 
 from enum import Flag, auto
 
-from langchain.tools import tool
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain.tools import InjectedToolCallId, tool
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -123,6 +123,29 @@ def _extract_last_ai_text(messages: list[BaseMessage]) -> str:
             if text:
                 return text
     return "子代理已完成任务，但没有返回文本结果。"
+
+
+def _render_tool_output(content: object) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return _trim_output(content)
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                    continue
+                parts.append(json.dumps(item, ensure_ascii=False))
+                continue
+            parts.append(str(item))
+        return _trim_output("\n".join(part for part in parts if part).strip())
+    return _trim_output(str(content))
 
 
 class ReadInput(BaseModel):
@@ -811,6 +834,7 @@ _SUBAGENT_TYPE_DESCRIPTION = (
 def make_agent_tool(
     subagents: dict[str, Any],
     name: str = "delegate_code",
+    event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> Any:
     """创建多类型子代理委派工具。
 
@@ -838,6 +862,7 @@ def make_agent_tool(
         task: str = "",
         context: str = "",
         thread_id: str = "",
+        tool_call_id: Annotated[str, InjectedToolCallId] = "",
     ) -> str:
         """把任务委派给子代理执行。支持多种子代理类型，默认为通用编码代理。"""
         # 查找子代理实例
@@ -859,13 +884,91 @@ def make_agent_tool(
 
         logger.info("delegate_code: type=%s, thread=%s", subagent_type, resolved_thread_id)
 
-        result = await agent.ainvoke(
+        invoke_config = {"configurable": {"thread_id": resolved_thread_id}}
+
+        if event_callback:
+            event_callback(
+                {
+                    "type": "subagent_start",
+                    "parent_tool_call_id": tool_call_id,
+                    "subagent_id": resolved_thread_id,
+                    "subagent_type": subagent_type,
+                    "thread_id": resolved_thread_id,
+                }
+            )
+
+        async for chunk in agent.astream(
             {"messages": [{"role": "user", "content": prompt}]},
-            config={"configurable": {"thread_id": resolved_thread_id}},
-        )
-        messages = result.get("messages", [])
-        summary = _extract_last_ai_text(messages)
-        return _trim_output(summary)
+            config=invoke_config,
+            stream_mode=["messages", "updates"],
+            version="v2",
+        ):
+            chunk_type = chunk.get("type")
+            if chunk_type == "messages":
+                token, metadata = chunk["data"]
+                if metadata.get("langgraph_node") == "model" and isinstance(token, AIMessageChunk) and token.text:
+                    continue
+                continue
+            if chunk_type != "updates":
+                continue
+
+            for step, data in chunk["data"].items():
+                if not isinstance(data, dict):
+                    continue
+                new_messages = data.get("messages", [])
+                if not isinstance(new_messages, list):
+                    continue
+
+                if step == "model":
+                    for message in new_messages:
+                        if not isinstance(message, AIMessage):
+                            continue
+                        for call in message.tool_calls:
+                            if event_callback:
+                                event_callback(
+                                    {
+                                        "type": "subagent_tool_start",
+                                        "parent_tool_call_id": tool_call_id,
+                                        "subagent_id": resolved_thread_id,
+                                        "subagent_type": subagent_type,
+                                        "name": call.get("name", "tool"),
+                                        "args": call.get("args", {}),
+                                        "tool_call_id": call.get("id", ""),
+                                    }
+                                )
+                elif step == "tools":
+                    for message in new_messages:
+                        if not isinstance(message, ToolMessage):
+                            continue
+                        if event_callback:
+                            event_callback(
+                                {
+                                    "type": "subagent_tool_end",
+                                    "parent_tool_call_id": tool_call_id,
+                                    "subagent_id": resolved_thread_id,
+                                    "subagent_type": subagent_type,
+                                    "name": message.name or "tool",
+                                    "output": _render_tool_output(message.content),
+                                    "tool_call_id": getattr(message, "tool_call_id", ""),
+                                }
+                            )
+
+        state = await agent.aget_state(invoke_config)
+        messages = state.values.get("messages", []) if state and state.values else []
+        summary = _trim_output(_extract_last_ai_text(messages))
+
+        if event_callback:
+            event_callback(
+                {
+                    "type": "subagent_finish",
+                    "parent_tool_call_id": tool_call_id,
+                    "subagent_id": resolved_thread_id,
+                    "subagent_type": subagent_type,
+                    "summary": summary,
+                }
+            )
+
+        return summary
 
     return delegate_code
 

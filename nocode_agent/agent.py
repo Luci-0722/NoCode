@@ -103,6 +103,7 @@ class MainAgent:
         auto_compactor: AutoCompactor | None = None,
         file_read_tracker: FileReadTracker | None = None,
         sm_extractor: SessionMemoryExtractor | None = None,
+        pending_subagent_events: list[dict[str, Any]] | None = None,
     ):
         self._agent = agent
         self._checkpointer = checkpointer
@@ -112,6 +113,7 @@ class MainAgent:
         self._auto_compactor = auto_compactor
         self._file_tracker = file_read_tracker or FileReadTracker()
         self._sm_extractor = sm_extractor
+        self._pending_subagent_events = pending_subagent_events if pending_subagent_events is not None else []
 
     @staticmethod
     def _new_thread_id() -> str:
@@ -131,6 +133,20 @@ class MainAgent:
 
     async def clear(self):
         await self._checkpointer.delete_thread(self._thread_id)
+
+    def _drain_subagent_events(self, parent_tool_call_id: str) -> list[dict[str, Any]]:
+        if not parent_tool_call_id or not self._pending_subagent_events:
+            return []
+
+        matched: list[dict[str, Any]] = []
+        remaining: list[dict[str, Any]] = []
+        for event in self._pending_subagent_events:
+            if event.get("parent_tool_call_id") == parent_tool_call_id:
+                matched.append(event)
+            else:
+                remaining.append(event)
+        self._pending_subagent_events[:] = remaining
+        return matched
 
     async def chat(self, user_input: str):
         """异步生成器，yield (event_type, *data)。包含自动重试。"""
@@ -189,11 +205,15 @@ class MainAgent:
                                     if message.name == "read" and self._file_tracker:
                                         self._file_tracker.record_from_tool_message(message)
 
+                                    tool_call_id = getattr(message, "tool_call_id", "")
+                                    for subagent_event in self._drain_subagent_events(str(tool_call_id or "")):
+                                        yield (subagent_event["type"], subagent_event)
+
                                     yield (
                                         "tool_end",
                                         message.name or "tool",
                                         _render_tool_output(message.content),
-                                        getattr(message, "tool_call_id", ""),
+                                        tool_call_id,
                                     )
 
                         # ── Auto-Compact + SM 提取（每轮结束后） ──
@@ -548,7 +568,13 @@ async def create_mainagent(
         "verification": verification_agent,
     }
 
-    tools = [*core_tools, *skill_tools, *mcp_tools, make_agent_tool(subagents_map)]
+    pending_subagent_events: list[dict[str, Any]] = []
+    tools = [
+        *core_tools,
+        *skill_tools,
+        *mcp_tools,
+        make_agent_tool(subagents_map, event_callback=pending_subagent_events.append),
+    ]
     agent = create_agent(
         model=main_llm,
         tools=tools,
@@ -569,4 +595,5 @@ async def create_mainagent(
         auto_compactor=auto_compactor,
         file_read_tracker=file_tracker,
         sm_extractor=sm_extractor,
+        pending_subagent_events=pending_subagent_events,
     )

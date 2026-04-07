@@ -94,6 +94,10 @@ async def _stream_prompt(agent, prompt: str) -> None:
                         "tool_call_id": data[2] if len(data) > 2 else "",
                     }
                 )
+            elif event_type in {"subagent_start", "subagent_tool_start", "subagent_tool_end", "subagent_finish"}:
+                payload = data[0] if data else {}
+                if isinstance(payload, dict):
+                    _emit(payload)
     except asyncio.CancelledError:
         _emit({"type": "cancelled"})
     except Exception as error:

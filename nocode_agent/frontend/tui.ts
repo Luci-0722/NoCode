@@ -24,9 +24,28 @@ type ToolCall = {
   status: "running" | "done";
   expanded: boolean;
   toolCallId?: string;
+  subagents?: SubagentRun[];
 };
 
 type Message = TextMessage | ToolCall;
+
+type SubagentToolCall = {
+  id: number;
+  name: string;
+  args?: Record<string, unknown>;
+  output?: string;
+  status: "running" | "done";
+  toolCallId?: string;
+};
+
+type SubagentRun = {
+  id: string;
+  subagentType: string;
+  threadId: string;
+  status: "running" | "done";
+  summary?: string;
+  toolCalls: SubagentToolCall[];
+};
 
 type PendingPrompt = {
   messageId: number;
@@ -64,6 +83,38 @@ type BackendEvent =
   | { type: "retry"; message: string; attempt: number; max_retries: number; delay: number }
   | { type: "tool_start"; name: string; args?: Record<string, unknown>; tool_call_id?: string }
   | { type: "tool_end"; name: string; output?: string; tool_call_id?: string }
+  | {
+      type: "subagent_start";
+      parent_tool_call_id: string;
+      subagent_id: string;
+      subagent_type: string;
+      thread_id: string;
+    }
+  | {
+      type: "subagent_tool_start";
+      parent_tool_call_id: string;
+      subagent_id: string;
+      subagent_type: string;
+      name: string;
+      args?: Record<string, unknown>;
+      tool_call_id?: string;
+    }
+  | {
+      type: "subagent_tool_end";
+      parent_tool_call_id: string;
+      subagent_id: string;
+      subagent_type: string;
+      name: string;
+      output?: string;
+      tool_call_id?: string;
+    }
+  | {
+      type: "subagent_finish";
+      parent_tool_call_id: string;
+      subagent_id: string;
+      subagent_type: string;
+      summary?: string;
+    }
   | { type: "question"; questions: Question[]; tool_call_id: string }
   | { type: "done" }
   | { type: "error"; message: string }
@@ -144,6 +195,7 @@ class TypeScriptTui {
   private readonly keyInput = new PassThrough();
   private nextMessageId = 1;
   private nextToolId = 1;
+  private nextSubagentToolId = 1;
   private selectedToolId: number | null = null;
   private followLatestTool = true;
   // ── Resume / session picker state ──────────────────────────
@@ -483,6 +535,35 @@ class TypeScriptTui {
         this.finishToolRun(event.name, event.output, event.tool_call_id);
         break;
       }
+      case "subagent_start":
+        this.startSubagentRun(event.parent_tool_call_id, event.subagent_id, event.subagent_type, event.thread_id);
+        break;
+      case "subagent_tool_start":
+        this.startSubagentToolRun(
+          event.parent_tool_call_id,
+          event.subagent_id,
+          event.subagent_type,
+          event.name,
+          event.args,
+          event.tool_call_id,
+        );
+        break;
+      case "subagent_tool_end":
+        this.finishSubagentToolRun(
+          event.parent_tool_call_id,
+          event.subagent_id,
+          event.name,
+          event.output,
+          event.tool_call_id,
+        );
+        break;
+      case "subagent_finish":
+        this.finishSubagentRun(
+          event.parent_tool_call_id,
+          event.subagent_id,
+          event.summary,
+        );
+        break;
       case "question":
         this.flushStreamingToHistory();
         this.questionMode = true;
@@ -695,6 +776,107 @@ class TypeScriptTui {
     if (this.followLatestTool || this.selectedToolId === run.id || this.selectedToolId === null) {
       this.selectedToolId = run.id;
     }
+  }
+
+  private findToolRunByToolCallId(toolCallId: string): ToolCall | undefined {
+    if (!toolCallId) {
+      return undefined;
+    }
+    return [...this.history]
+      .reverse()
+      .find((entry): entry is ToolCall => entry.kind === "tool" && entry.toolCallId === toolCallId);
+  }
+
+  private ensureSubagentRun(
+    parentToolCallId: string,
+    subagentId: string,
+    subagentType: string,
+    threadId: string,
+  ): SubagentRun | null {
+    const parent = this.findToolRunByToolCallId(parentToolCallId);
+    if (!parent) {
+      return null;
+    }
+    if (!parent.subagents) {
+      parent.subagents = [];
+    }
+    let run = parent.subagents.find((item) => item.id === subagentId);
+    if (!run) {
+      run = {
+        id: subagentId,
+        subagentType,
+        threadId,
+        status: "running",
+        summary: "",
+        toolCalls: [],
+      };
+      parent.subagents.push(run);
+      parent.expanded = true;
+    }
+    return run;
+  }
+
+  private startSubagentRun(
+    parentToolCallId: string,
+    subagentId: string,
+    subagentType: string,
+    threadId: string,
+  ): void {
+    this.ensureSubagentRun(parentToolCallId, subagentId, subagentType, threadId);
+  }
+
+  private startSubagentToolRun(
+    parentToolCallId: string,
+    subagentId: string,
+    subagentType: string,
+    name: string,
+    args?: Record<string, unknown>,
+    toolCallId?: string,
+  ): void {
+    const run = this.ensureSubagentRun(parentToolCallId, subagentId, subagentType, subagentId);
+    if (!run) {
+      return;
+    }
+    run.toolCalls.push({
+      id: this.nextSubagentToolId++,
+      name,
+      args,
+      status: "running",
+      output: "",
+      toolCallId,
+    });
+  }
+
+  private finishSubagentToolRun(
+    parentToolCallId: string,
+    subagentId: string,
+    name: string,
+    output?: string,
+    toolCallId?: string,
+  ): void {
+    const parent = this.findToolRunByToolCallId(parentToolCallId);
+    const run = parent?.subagents?.find((item) => item.id === subagentId);
+    if (!run) {
+      return;
+    }
+    const tool = [...run.toolCalls]
+      .reverse()
+      .find((item) => item.status === "running" && (toolCallId ? item.toolCallId === toolCallId : item.name === name));
+    if (!tool) {
+      return;
+    }
+    tool.status = "done";
+    tool.output = output || "";
+  }
+
+  private finishSubagentRun(parentToolCallId: string, subagentId: string, summary?: string): void {
+    const parent = this.findToolRunByToolCallId(parentToolCallId);
+    const run = parent?.subagents?.find((item) => item.id === subagentId);
+    if (!run) {
+      return;
+    }
+    run.status = "done";
+    run.summary = summary || run.summary || "";
   }
 
   private trimHistory(): void {
@@ -1672,7 +1854,44 @@ class TypeScriptTui {
     for (const line of this.wrap(`result: ${output}`, availableWidth)) {
       lines.push(`${COLOR.dim}  ⎿ ${line}${COLOR.reset}`);
     }
+    if (tool.subagents && tool.subagents.length > 0) {
+      lines.push(...this.renderSubagentRuns(tool.subagents, width));
+    }
     return lines;
+  }
+
+  private renderSubagentRuns(subagents: SubagentRun[], width: number): string[] {
+    const lines: string[] = [];
+    const availableWidth = Math.max(12, width - 8);
+
+    for (const run of subagents) {
+      const status = run.status === "running" ? "执行中..." : "已完成";
+      const summary = run.summary?.trim() ? ` · ${run.summary.trim()}` : "";
+      const header = `subagent ${run.subagentType} · ${this.truncate(run.threadId, 28)} · ${status}${summary}`;
+      for (const line of this.wrap(header, availableWidth)) {
+        lines.push(`${COLOR.accent}    ↳ ${line}${COLOR.reset}`);
+      }
+
+      for (const tool of run.toolCalls) {
+        const toolStatus = tool.status === "running"
+          ? `${COLOR.warning}执行中...${COLOR.reset}`
+          : `${COLOR.secondary}${this.describeSubagentToolOutcome(tool, availableWidth)}${COLOR.reset}`;
+        const text = `${tool.name}${tool.args && Object.keys(tool.args).length > 0 ? ` (${this.formatToolArgs(tool.args)})` : ""}  ${toolStatus}`;
+        for (const line of this.wrapAnsiAware(text, availableWidth)) {
+          lines.push(`      ${line}`);
+        }
+      }
+    }
+
+    return lines;
+  }
+
+  private describeSubagentToolOutcome(tool: SubagentToolCall, width: number): string {
+    const output = tool.output?.trim() ?? "";
+    if (!output) {
+      return "已完成";
+    }
+    return this.truncate(output.replace(/\s+/g, " "), Math.max(12, width - 12));
   }
 
   private formatToolSummary(tool: ToolCall, width: number): string {
