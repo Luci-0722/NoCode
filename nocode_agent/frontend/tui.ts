@@ -15,7 +15,7 @@ import {
   isKeypressPassthroughSequence,
   isShiftEnterSequence,
   looksLikeMouseSequence,
-} from "./input_protocol.js";
+} from "./input_protocol.ts";
 import {
   computeWheelStep,
   copyTextToNativeClipboard,
@@ -29,7 +29,7 @@ import {
   isXtermJsLike,
   readCopyOnSelect,
   type WheelAccelState,
-} from "./terminal_utils.js";
+} from "./terminal_utils.ts";
 
 type Role = "user" | "assistant" | "system";
 
