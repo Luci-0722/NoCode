@@ -371,6 +371,12 @@ class TypeScriptTui {
   }
 
   private onRawInput(chunk: string): void {
+    if (this.isCtrlCSequence(chunk)) {
+      this.exiting = true;
+      this.shutdown();
+      process.exit(0);
+    }
+
     if (this.isShiftEnterSequence(chunk)) {
       if (!this.showSessionPicker && !this.questionMode) {
         this.insertNewline();
@@ -387,6 +393,14 @@ class TypeScriptTui {
       || chunk === "\x1b[13;2~"
       || chunk === "\x1b[27;2;13~"
       || chunk === "\x1b[27;13;2~";
+  }
+
+  private isCtrlCSequence(chunk: string): boolean {
+    return chunk === "\x03"
+      || chunk === "\x1b[99;5u"
+      || chunk === "\x1b[99;6u"
+      || chunk === "\x1b[27;5;99~"
+      || chunk === "\x1b[27;6;99~";
   }
 
   private flushKeyboardInput(text: string): void {
