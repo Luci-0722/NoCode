@@ -1879,7 +1879,8 @@ class TypeScriptTui {
 
   private positionCursor(width: number, promptStartRow: number): void {
     const availableWidth = Math.max(12, width - 4);
-    let visualRowOffset = 1;
+    // composer 的第 1 行是分隔线，真正输入内容从下一行开始。
+    let visualRowOffset = 2;
 
     for (let i = 0; i < this.cursorRow; i += 1) {
       const wrapped = this.wrap(this.inputLines[i], availableWidth);
@@ -1893,10 +1894,10 @@ class TypeScriptTui {
     const cursorColBase = wrappedBeforeCursor.length === 0
       ? 0
       : this.visibleLength(wrappedBeforeCursor[wrappedBeforeCursor.length - 1]);
-    const promptPrefix = cursorLine === 0 ? 2 : 2;
-    
+    // `❯ ` 和续行前缀 `  ` 都占 2 列，光标应落在正文起始列。
+    const promptPrefix = 3;
+
     const row = promptStartRow + visualRowOffset + cursorLine;
-    // 光标直接定位到文本宽度后的列，避免行尾额外偏移导致“浮在上一条线”。
     const col = promptPrefix + cursorColBase;
     process.stdout.write(`\x1b[${row};${Math.max(1, col)}H`);
   }
