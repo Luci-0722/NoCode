@@ -92,7 +92,7 @@ const COLOR = {
   selectedSubtle: "\x1b[38;2;168;191;201m",
   md: {
     heading: "\x1b[38;2;95;215;175m",
-    headingBold: "\x1b[38;2;95;215;175m\x1b[1m",
+    headingBold: "\x1b[38;2;95;215;175m",
     code: "\x1b[38;2;255;180;108m",
     codeBg: "\x1b[48;2;40;44;52m",
     strong: "\x1b[48;2;244;248;255m\x1b[38;2;49;110;201m",
@@ -101,7 +101,7 @@ const COLOR = {
     hr: "\x1b[38;2;80;80;80m",
     listBullet: "\x1b[38;2;95;215;175m",
     tableBorder: "\x1b[38;2;80;90;100m",
-    tableHeader: "\x1b[38;2;186;198;207m\x1b[1m",
+    tableHeader: "\x1b[38;2;186;198;207m",
   },
 };
 
@@ -1317,7 +1317,7 @@ class TypeScriptTui {
       const renderedLines = this.renderMarkdownLines(content || " ", availableWidth);
       return renderedLines.map((line, index) => {
         const leader = index === 0 ? prefix : continuation;
-        const marker = `${COLOR.accent}${COLOR.bold}${leader}${COLOR.reset}`;
+        const marker = `${COLOR.accent}${leader}${COLOR.reset}`;
         return `${marker}${line}`;
       });
     }
