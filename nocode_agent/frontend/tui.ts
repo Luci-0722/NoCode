@@ -7,8 +7,9 @@ import { PassThrough } from "node:stream";
 
 type Role = "user" | "assistant" | "system";
 
-type Message = {
+type TextMessage = {
   id: number;
+  kind: "message";
   role: Role;
   content: string;
   state?: "queued" | "sent";
@@ -16,12 +17,16 @@ type Message = {
 
 type ToolCall = {
   id: number;
+  kind: "tool";
   name: string;
   args?: Record<string, unknown>;
   output?: string;
   status: "running" | "done";
   expanded: boolean;
+  toolCallId?: string;
 };
+
+type Message = TextMessage | ToolCall;
 
 type PendingPrompt = {
   messageId: number;
@@ -56,15 +61,17 @@ type BackendEvent =
   | { type: "status"; thread_id: string; model: string; subagent_model: string; cwd: string }
   | { type: "cleared"; thread_id: string }
   | { type: "text"; delta: string }
-  | { type: "tool_start"; name: string; args?: Record<string, unknown> }
-  | { type: "tool_end"; name: string; output?: string }
+  | { type: "retry"; message: string; attempt: number; max_retries: number; delay: number }
+  | { type: "tool_start"; name: string; args?: Record<string, unknown>; tool_call_id?: string }
+  | { type: "tool_end"; name: string; output?: string; tool_call_id?: string }
   | { type: "question"; questions: Question[]; tool_call_id: string }
   | { type: "done" }
   | { type: "error"; message: string }
   | { type: "fatal"; message: string }
   | { type: "cancelled" }
   | { type: "thread_list"; threads: ThreadInfo[] }
-  | { type: "resumed"; thread_id: string; model: string; subagent_model: string; cwd: string };
+  | { type: "resumed"; thread_id: string; model: string; subagent_model: string; cwd: string }
+  | { type: "history"; messages: Array<{ role: string; content: string }> };
 
 const COLOR = {
   reset: "\x1b[0m",
@@ -96,7 +103,6 @@ const COLOR = {
 class TypeScriptTui {
   private readonly version = "NoCode";
   private readonly history: Message[] = [];
-  private readonly toolRuns: ToolCall[] = [];
   private readonly inputLines: string[] = [""];
   private readonly pendingPrompts: PendingPrompt[] = [];
   private backend!: ChildProcessWithoutNullStreams;
@@ -129,7 +135,6 @@ class TypeScriptTui {
   // ── Question mode state ───────────────────────────────────
   private questionMode = false;
   private activeQuestions: Question[] = [];
-  private questionToolCallId = "";
   private currentQuestionIndex = 0;
   private optionIndex = 0;
   private multiSelected: Set<number> = new Set();
@@ -187,6 +192,7 @@ class TypeScriptTui {
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             this.pushHistory({
+              kind: "message",
               role: "system",
               content: `invalid backend event: ${message}\n${line}`,
             });
@@ -203,6 +209,7 @@ class TypeScriptTui {
         return;
       }
       this.pushHistory({
+        kind: "message",
         role: "system",
         content: `backend exited with code ${code ?? "unknown"}`,
       });
@@ -240,7 +247,7 @@ class TypeScriptTui {
       }
       if (key.name === "escape") {
         this.showSessionPicker = false;
-        this.pushHistory({ role: "system", content: "取消恢复，使用新会话。" });
+        this.pushHistory({ kind: "message", role: "system", content: "取消恢复，使用新会话。" });
         this.render();
         return;
       }
@@ -262,11 +269,6 @@ class TypeScriptTui {
 
     if (key.ctrl && key.name === "o") {
       this.toggleSelectedTool();
-      return;
-    }
-
-    if (key.ctrl && key.name === "y") {
-      this.toggleMouseCapture();
       return;
     }
 
@@ -412,7 +414,6 @@ class TypeScriptTui {
         this.threadId = event.thread_id;
         this.history.length = 0;
         this.streaming = "";
-        this.toolRuns.length = 0;
         this.pendingPrompts.length = 0;
         this.selectedToolId = null;
         this.scrollOffset = 0;
@@ -421,19 +422,17 @@ class TypeScriptTui {
         this.streaming += event.delta;
         break;
       case "tool_start":
-        this.startToolRun(event.name, event.args);
+        this.flushStreamingToHistory();
+        this.startToolRun(event.name, event.args, event.tool_call_id);
         break;
       case "tool_end": {
-        this.finishToolRun(event.name, event.output);
-        if (event.name === "ask_user_question" && this.questionMode) {
-          this.questionMode = false;
-        }
+        this.finishToolRun(event.name, event.output, event.tool_call_id);
         break;
       }
       case "question":
+        this.flushStreamingToHistory();
         this.questionMode = true;
         this.activeQuestions = event.questions;
-        this.questionToolCallId = event.tool_call_id || "";
         this.currentQuestionIndex = 0;
         this.optionIndex = 0;
         this.multiSelected = new Set();
@@ -442,22 +441,27 @@ class TypeScriptTui {
         this.questionAnswers = [];
         break;
       case "done":
-        if (this.streaming.trim()) {
-          this.pushHistory({ role: "assistant", content: this.streaming });
-        }
-        this.streaming = "";
+        this.flushStreamingToHistory();
         this.generating = false;
         this.dispatchNextQueuedPrompt();
         break;
+      case "retry":
+        this.pushHistory({
+          kind: "message",
+          role: "system",
+          content: `⏳ 请求被限流，第 ${event.attempt}/${event.max_retries} 次重试，${event.delay.toFixed(0)}s 后...`,
+        });
+        this.render();
+        break;
       case "error":
       case "fatal":
-        this.pushHistory({ role: "system", content: `${event.type}: ${event.message}` });
+        this.pushHistory({ kind: "message", role: "system", content: `${event.type}: ${event.message}` });
         this.streaming = "";
         this.generating = false;
         this.pendingPrompts.length = 0;
         break;
       case "cancelled":
-        this.pushHistory({ role: "system", content: "⏹ 已中断生成" });
+        this.pushHistory({ kind: "message", role: "system", content: "⏹ 已中断生成" });
         this.pendingPrompts.length = 0;
         break;
       case "thread_list":
@@ -466,7 +470,7 @@ class TypeScriptTui {
         this.sessionPickerScroll = 0;
         if (this.sessionThreads.length === 0) {
           this.showSessionPicker = false;
-          this.pushHistory({ role: "system", content: "没有找到历史会话，将创建新会话。" });
+          this.pushHistory({ kind: "message", role: "system", content: "没有找到历史会话，将创建新会话。" });
         }
         break;
       case "resumed":
@@ -475,7 +479,14 @@ class TypeScriptTui {
         this.subagentModel = event.subagent_model;
         this.cwd = event.cwd;
         this.showSessionPicker = false;
-        this.pushHistory({ role: "system", content: `已恢复会话 ${event.thread_id.slice(-8)}` });
+        this.sendBackend({ type: "load_history" });
+        break;
+      case "history":
+        for (const msg of event.messages) {
+          if (msg.role === "user" || msg.role === "assistant" || msg.role === "system") {
+            this.pushHistory({ kind: "message", role: msg.role as Role, content: msg.content });
+          }
+        }
         break;
     }
     this.render();
@@ -493,6 +504,7 @@ class TypeScriptTui {
     }
 
     const messageId = this.pushHistory({
+      kind: "message",
       role: "user",
       content: text,
       state: this.generating ? "queued" : "sent",
@@ -529,14 +541,15 @@ class TypeScriptTui {
 
     if (command === "/help") {
       this.pushHistory({
+        kind: "message",
         role: "system",
-        content: "Commands: /help /clear /session /quit\nESC clear input / interrupt agent\nEnter submits\nShift+Enter inserts newline\nCtrl+J/K select tool  Ctrl+O expand tool result\nCtrl+Y toggle wheel/copy mode\n启动时加 --resume 可选择历史会话恢复",
+        content: "Commands: /help /clear /session /quit\nESC clear input / interrupt agent\nEnter submits\nShift+Enter inserts newline\nCtrl+J/K select tool  Ctrl+O expand tool result\nwheel 直接滚动 transcript\n启动时加 --resume 可选择历史会话恢复",
       });
       this.render();
       return;
     }
 
-    this.pushHistory({ role: "system", content: `unknown command: ${text}` });
+    this.pushHistory({ kind: "message", role: "system", content: `unknown command: ${text}` });
     this.render();
   }
 
@@ -552,7 +565,7 @@ class TypeScriptTui {
 
   private updateMessageState(messageId: number, state: "queued" | "sent"): void {
     const message = this.history.find((entry) => entry.id === messageId);
-    if (message && message.role === "user") {
+    if (message?.kind === "message" && message.role === "user") {
       message.state = state;
     }
   }
@@ -573,21 +586,41 @@ class TypeScriptTui {
     this.dispatchPrompt(next.text, next.messageId);
   }
 
-  private startToolRun(name: string, args?: Record<string, unknown>): void {
+  private flushStreamingToHistory(): void {
+    const content = this.streaming.trimEnd();
+    if (!content.trim()) {
+      this.streaming = "";
+      return;
+    }
+    this.pushHistory({
+      kind: "message",
+      role: "assistant",
+      content,
+    });
+    this.streaming = "";
+  }
+
+  private startToolRun(name: string, args?: Record<string, unknown>, toolCallId?: string): void {
     const run: ToolCall = {
       id: this.nextToolId++,
+      kind: "tool",
       name,
       args,
       status: "running",
       expanded: false,
+      toolCallId,
     };
-    this.toolRuns.push(run);
-    this.trimToolRuns();
+    this.history.push(run);
+    this.trimHistory();
     this.selectedToolId = run.id;
   }
 
-  private finishToolRun(name: string, output?: string): void {
-    const run = [...this.toolRuns].reverse().find((tool) => tool.name === name && tool.status === "running");
+  private finishToolRun(name: string, output?: string, toolCallId?: string): void {
+    const run = [...this.history]
+      .reverse()
+      .find((entry): entry is ToolCall => entry.kind === "tool"
+        && entry.status === "running"
+        && (toolCallId ? entry.toolCallId === toolCallId : entry.name === name));
     if (!run) {
       return;
     }
@@ -596,19 +629,19 @@ class TypeScriptTui {
     this.selectedToolId = run.id;
   }
 
-  private trimToolRuns(): void {
-    const maxRuns = 24;
-    if (this.toolRuns.length <= maxRuns) {
+  private trimHistory(): void {
+    const maxEntries = 160;
+    if (this.history.length <= maxEntries) {
       return;
     }
-    const removed = this.toolRuns.splice(0, this.toolRuns.length - maxRuns);
-    if (this.selectedToolId !== null && removed.some((tool) => tool.id === this.selectedToolId)) {
-      this.selectedToolId = this.toolRuns[0]?.id ?? null;
+    const removed = this.history.splice(0, this.history.length - maxEntries);
+    if (this.selectedToolId !== null && removed.some((entry) => entry.kind === "tool" && entry.id === this.selectedToolId)) {
+      this.selectedToolId = this.getSelectableTools()[0]?.id ?? null;
     }
   }
 
   private getSelectableTools(): ToolCall[] {
-    return this.toolRuns.slice(-8);
+    return this.history.filter((entry): entry is ToolCall => entry.kind === "tool");
   }
 
   private moveToolSelection(delta: number): void {
@@ -625,17 +658,11 @@ class TypeScriptTui {
   }
 
   private toggleSelectedTool(): void {
-    const tool = this.toolRuns.find((entry) => entry.id === this.selectedToolId);
+    const tool = this.history.find((entry): entry is ToolCall => entry.kind === "tool" && entry.id === this.selectedToolId);
     if (!tool) {
       return;
     }
     tool.expanded = !tool.expanded;
-    this.render();
-  }
-
-  private toggleMouseCapture(): void {
-    this.mouseCaptureEnabled = !this.mouseCaptureEnabled;
-    this.setMouseCapture(this.mouseCaptureEnabled);
     this.render();
   }
 
@@ -848,17 +875,40 @@ class TypeScriptTui {
       return;
     }
 
-    // All questions answered — send to backend
-    this.sendBackend({
-      type: "answer",
-      answers: { answers: this.questionAnswers },
-      tool_call_id: this.questionToolCallId,
-    });
-
+    // All questions answered — format as user message and send as prompt
+    const answerText = this.formatQuestionAnswer();
     this.questionMode = false;
     this.activeQuestions = [];
     this.questionAnswers = [];
+
+    // Push to history and dispatch as a normal prompt
+    const messageId = this.pushHistory({
+      kind: "message",
+      role: "user",
+      content: answerText,
+      state: this.generating ? "queued" : "sent",
+    });
+    if (this.generating) {
+      this.pendingPrompts.push({ messageId, text: answerText });
+    } else {
+      this.dispatchPrompt(answerText, messageId);
+    }
     this.render();
+  }
+
+  private formatQuestionAnswer(): string {
+    if (this.questionAnswers.length === 0) {
+      return "(跳过了所有问题)";
+    }
+    const parts: string[] = [];
+    for (const ans of this.questionAnswers) {
+      const q = this.activeQuestions[ans.question_index];
+      if (!q) continue;
+      const questionText = q.question;
+      const answer = ans.selected.length > 0 ? ans.selected.join(", ") : "(跳过)";
+      parts.push(`${questionText} → ${answer}`);
+    }
+    return parts.join("\n");
   }
 
   private renderQuestionUI(width: number, maxHeight: number): string[] {
@@ -952,6 +1002,8 @@ class TypeScriptTui {
     parts.push("Esc 跳过");
     return parts.join("  ");
   }
+
+  private insertText(text: string): void {
     const line = this.inputLines[this.cursorRow];
     this.inputLines[this.cursorRow] = line.slice(0, this.cursorCol) + text + line.slice(this.cursorCol);
     this.cursorCol += text.length;
@@ -1099,21 +1151,17 @@ class TypeScriptTui {
     }
 
     for (const message of this.history) {
-      lines.push(...this.renderMessageBlock(message, width));
+      lines.push(...this.renderHistoryEntry(message, width));
       lines.push("");
     }
 
-    const toolLines = this.renderToolSummary(width);
-
     if (this.streaming || this.generating) {
-      lines.push(...this.renderMessageBlock({ id: -1, role: "assistant", content: this.streaming || "思考中..." }, width));
-      if (toolLines.length > 0) {
-        lines.push("");
-        lines.push(...toolLines);
-      }
-      lines.push("");
-    } else if (toolLines.length > 0) {
-      lines.push(...toolLines);
+      lines.push(...this.renderHistoryEntry({
+        id: -1,
+        kind: "message",
+        role: "assistant",
+        content: this.streaming || "思考中...",
+      }, width));
       lines.push("");
     }
 
@@ -1124,7 +1172,14 @@ class TypeScriptTui {
     return lines;
   }
 
-  private renderMessageBlock(message: Message, width: number): string[] {
+  private renderHistoryEntry(entry: Message, width: number): string[] {
+    if (entry.kind === "tool") {
+      return this.renderToolBlock(entry, width);
+    }
+    return this.renderMessageBlock(entry, width);
+  }
+
+  private renderMessageBlock(message: TextMessage, width: number): string[] {
     const { role, content, state } = message;
     const availableWidth = Math.max(12, width - 4);
     const prefix = role === "user" ? "❯ " : role === "assistant" ? "⏺ " : "  ";
@@ -1460,25 +1515,21 @@ class TypeScriptTui {
 
   // ── End Markdown renderer ─────────────────────────────────────
 
-  private renderToolSummary(width: number): string[] {
-    const summaries: string[] = [];
-    const tools = this.getSelectableTools();
-    if (tools.length === 0) {
-      return summaries;
+  private renderToolBlock(tool: ToolCall, width: number): string[] {
+    const lines: string[] = [];
+    const selected = tool.id === this.selectedToolId;
+    const prefix = `${selected ? `${COLOR.accent}${COLOR.bold}` : `${COLOR.accent}`}${selected ? "▸" : "⏺"} ${COLOR.reset}`;
+    const bodyWidth = Math.max(12, width - 2);
+    const summary = this.formatToolSummary(tool, bodyWidth);
+
+    for (const line of this.wrapAnsiAware(summary, bodyWidth)) {
+      lines.push(`${prefix}${line}`);
     }
 
-    summaries.push(`${COLOR.secondary}${"░".repeat(width)}${COLOR.reset}`);
-    for (const tool of tools) {
-      const selected = tool.id === this.selectedToolId;
-      const prefix = selected ? "▸" : " ";
-      const color = tool.status === "running" ? COLOR.warning : COLOR.secondary;
-      const line = `${prefix} ${this.formatToolLabel(tool, width - 4)}`;
-      summaries.push(`${color}${this.truncate(line, width)}${COLOR.reset}`);
-      if (tool.expanded) {
-        summaries.push(...this.renderExpandedTool(tool, width));
-      }
+    if (tool.expanded) {
+      lines.push(...this.renderExpandedTool(tool, width));
     }
-    return summaries;
+    return lines;
   }
 
   private renderExpandedTool(tool: ToolCall, width: number): string[] {
@@ -1486,27 +1537,57 @@ class TypeScriptTui {
     const availableWidth = Math.max(12, width - 6);
     const args = tool.args && Object.keys(tool.args).length > 0
       ? this.formatToolArgs(tool.args)
-      : "no args";
-    const output = tool.output?.trim() ? tool.output.trim() : "(no output)";
+      : "无参数";
+    const output = tool.output?.trim() ? tool.output.trim() : "(无输出)";
 
     for (const line of this.wrap(`args: ${args}`, availableWidth)) {
-      lines.push(`${COLOR.dim}    ${line}${COLOR.reset}`);
+      lines.push(`${COLOR.dim}  ⎿ ${line}${COLOR.reset}`);
     }
     for (const line of this.wrap(`result: ${output}`, availableWidth)) {
-      lines.push(`${COLOR.dim}    ${line}${COLOR.reset}`);
+      lines.push(`${COLOR.dim}  ⎿ ${line}${COLOR.reset}`);
     }
     return lines;
   }
 
-  private formatToolLabel(tool: ToolCall, width: number): string {
-    const status = tool.status === "running" ? "running" : "done";
-    const args = tool.args && Object.keys(tool.args).length > 0
-      ? `(${this.formatToolArgs(tool.args)})`
-      : "()";
-    const result = tool.status === "done" && tool.output
-      ? ` => ${this.summarizeToolOutput(tool.output)}`
-      : "";
-    return this.truncate(`${tool.name}${args} [${status}]${result}`, width);
+  private formatToolSummary(tool: ToolCall, width: number): string {
+    const title = this.describeTool(tool);
+    const status = tool.status === "running"
+      ? `${COLOR.warning}执行中...${COLOR.reset}`
+      : `${COLOR.secondary}${this.describeToolOutcome(tool, width)}${COLOR.reset}`;
+    return this.truncateAnsiAware(`${title}${tool.status === "done" ? `  ${status}` : `  ${status}`}`, width);
+  }
+
+  private describeTool(tool: ToolCall): string {
+    const argSummary = this.describeToolArgs(tool);
+    if (!argSummary) {
+      return tool.name;
+    }
+    return `${tool.name} ${argSummary}`;
+  }
+
+  private describeToolArgs(tool: ToolCall): string {
+    if (!tool.args || Object.keys(tool.args).length === 0) {
+      return "";
+    }
+    if (tool.name === "ask_user_question") {
+      const questions = Array.isArray(tool.args.questions) ? tool.args.questions.length : 0;
+      return `提出 ${questions || 1} 个问题`;
+    }
+    return `(${this.formatToolArgs(tool.args)})`;
+  }
+
+  private describeToolOutcome(tool: ToolCall, width: number): string {
+    const output = tool.output?.trim() ?? "";
+    if (!output) {
+      return "已完成";
+    }
+    const singleLine = output.replace(/\s+/g, " ").trim();
+    const compact = this.truncate(singleLine, Math.max(12, width - 12));
+    if (singleLine.length <= compact.length) {
+      return compact;
+    }
+    const hiddenLines = Math.max(1, output.split("\n").length - 3);
+    return `${compact} (ctrl+o 展开, 约 +${hiddenLines} 行)`;
   }
 
   private formatToolArgs(args: Record<string, unknown>): string {
@@ -1569,8 +1650,7 @@ class TypeScriptTui {
     const state = this.generating ? "busy" : "idle";
     const queue = this.pendingPrompts.length > 0 ? `  queue ${this.pendingPrompts.length}` : "";
     const scroll = this.scrollOffset > 0 ? `  scroll +${this.scrollOffset}` : "";
-    const mouse = this.mouseCaptureEnabled ? "wheel on" : "copy mode";
-    const text = `Enter submit  Shift+Enter newline  Ctrl+J/K tool  Ctrl+O expand  Ctrl+Y ${mouse}  ${state}${queue}  ${this.subagentModel}${scroll}`;
+    const text = `Enter submit  Shift+Enter newline  Ctrl+J/K tool  Ctrl+O expand  wheel scroll  ${state}${queue}  ${this.subagentModel}${scroll}`;
     return ["", `${COLOR.secondary}${this.truncate(text, width)}${COLOR.reset}`];
   }
 
@@ -1646,6 +1726,44 @@ class TypeScriptTui {
 
   private stripAnsi(text: string): string {
     return text.replace(/\x1b\[[0-9;]*m/g, "");
+  }
+
+  private truncateAnsiAware(text: string, width: number): string {
+    if (this.visibleLength(text) <= width) {
+      return text;
+    }
+    if (width <= 0) {
+      return "";
+    }
+
+    let result = "";
+    let visible = 0;
+    const ansiPattern = /\x1b\[[0-9;]*m/g;
+    let index = 0;
+
+    while (index < text.length && visible < Math.max(0, width - 1)) {
+      ansiPattern.lastIndex = index;
+      const ansiMatch = ansiPattern.exec(text);
+      if (ansiMatch && ansiMatch.index === index) {
+        result += ansiMatch[0];
+        index += ansiMatch[0].length;
+        continue;
+      }
+
+      const char = Array.from(text.slice(index))[0];
+      if (!char) {
+        break;
+      }
+      const charWidth = this.charWidth(char);
+      if (visible + charWidth > Math.max(0, width - 1)) {
+        break;
+      }
+      result += char;
+      visible += charWidth;
+      index += char.length;
+    }
+
+    return `${result}…${COLOR.reset}`;
   }
 
   private charWidth(char: string): number {
