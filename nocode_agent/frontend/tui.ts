@@ -1915,20 +1915,34 @@ class TypeScriptTui {
   }
 
   private columnToTextIndex(text: string, column: number): number {
+    if (column <= 0) {
+      return 0;
+    }
+    
     let visible = 0;
     let index = 0;
-    for (const char of Array.from(text)) {
+    const chars = Array.from(text);
+    
+    for (let i = 0; i < chars.length; i++) {
+      const char = chars[i];
       const width = this.charWidth(char);
+      
+      // 如果当前字符的起始位置就超过了目标列，返回当前位置
       if (visible >= column) {
-        break;
+        return i;
       }
+      
+      // 如果当前字符的结束位置超过目标列，返回当前位置
+      if (visible + width > column) {
+        return i;
+      }
+      
       visible += width;
-      index += 1;
-      if (visible > column) {
-        break;
-      }
+      index = i + 1;
     }
-    return index;
+    
+    // 如果循环结束，说明所有字符都在目标列之前，返回字符总数
+    return chars.length;
   }
 
   private getSelectionRange(): { start: { row: number; col: number }; end: { row: number; col: number } } | null {
