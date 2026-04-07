@@ -577,6 +577,16 @@ class TypeScriptTui {
     if (this.nativeSelectionMode && !this.looksLikeMouseSequence(chunk)) {
       this.leaveNativeSelectionMode();
     }
+    if (!this.showSessionPicker && !this.questionMode) {
+      if (chunk === "\x0a") {
+        this.moveToolSelection(1);
+        return;
+      }
+      if (chunk === "\x0b") {
+        this.moveToolSelection(-1);
+        return;
+      }
+    }
     if (chunk === "\x0f") {
       this.toggleSelectedTool();
       return;
