@@ -86,6 +86,10 @@ const COLOR = {
   warning: "\x1b[38;2;244;211;94m",
   danger: "\x1b[38;2;255;107;107m",
   user: "\x1b[38;2;126;217;87m",
+  selectedBg: "\x1b[48;2;32;48;58m",
+  selectedBorder: "\x1b[38;2;95;215;175m",
+  selectedText: "\x1b[38;2;230;238;242m",
+  selectedSubtle: "\x1b[38;2;168;191;201m",
   md: {
     heading: "\x1b[38;2;95;215;175m",
     headingBold: "\x1b[38;2;95;215;175m\x1b[1m",
@@ -774,10 +778,8 @@ class TypeScriptTui {
       const count = `${t.message_count} msgs`;
 
       if (selected) {
-        // Use reverse video for the entire line — impossible to miss
-        const content = ` > ${id}  ${preview}  ${count}`;
-        const padded = this.padRight(content, width);
-        lines.push(`\x1b[7m${COLOR.bold}${padded}${COLOR.reset}`);
+        const content = `${COLOR.selectedText}${COLOR.bold}${id}${COLOR.reset}  ${COLOR.selectedText}${preview}${COLOR.reset}  ${COLOR.selectedSubtle}${count}${COLOR.reset}`;
+        lines.push(this.renderSelectedRow(content, width, "▸"));
       } else {
         const idCol = `${COLOR.secondary}${id}${COLOR.reset}`;
         const countCol = `${COLOR.dim}${count}${COLOR.reset}`;
@@ -994,8 +996,7 @@ class TypeScriptTui {
     // ── Freeform text mode (no options) ──
     if (options.length === 0) {
       const inputLine = ` > ${this.otherText}_`;
-      const padded = this.padRight(inputLine, width);
-      lines.push(`\x1b[7m${COLOR.bold}${padded}${COLOR.reset}`);
+      lines.push(this.renderSelectedRow(`${COLOR.selectedText}${COLOR.bold}${inputLine}${COLOR.reset}`, width));
       while (lines.length < maxHeight) lines.push("");
       return lines;
     }
@@ -1011,16 +1012,16 @@ class TypeScriptTui {
         const label = `${check} ${opt.label}`;
         const desc = opt.description ? ` - ${opt.description}` : "";
         if (highlighted) {
-          const content = ` > ${label}${desc}`;
-          lines.push(`\x1b[7m${COLOR.bold}${this.padRight(content, width)}${COLOR.reset}`);
+          const content = `${COLOR.selectedText}${COLOR.bold}${label}${COLOR.reset}${COLOR.selectedSubtle}${desc}${COLOR.reset}`;
+          lines.push(this.renderSelectedRow(content, width));
         } else {
           lines.push(`   ${COLOR.soft}${label}${COLOR.reset}${COLOR.dim}${desc}${COLOR.reset}`);
         }
       } else {
         const desc = opt.description ? ` - ${opt.description}` : "";
         if (highlighted) {
-          const content = ` > ${opt.label}${desc}`;
-          lines.push(`\x1b[7m${COLOR.bold}${this.padRight(content, width)}${COLOR.reset}`);
+          const content = `${COLOR.selectedText}${COLOR.bold}${opt.label}${COLOR.reset}${COLOR.selectedSubtle}${desc}${COLOR.reset}`;
+          lines.push(this.renderSelectedRow(content, width));
         } else {
           lines.push(`   ${COLOR.soft}${opt.label}${COLOR.reset}${COLOR.dim}${desc}${COLOR.reset}`);
         }
@@ -1031,10 +1032,10 @@ class TypeScriptTui {
     const isOtherHighlighted = this.optionIndex === options.length;
     if (this.otherMode) {
       const inputLine = ` > Other: ${this.otherText}_`;
-      lines.push(`\x1b[7m${COLOR.warning}${COLOR.bold}${this.padRight(inputLine, width)}${COLOR.reset}`);
+      lines.push(this.renderSelectedRow(`${COLOR.warning}${COLOR.bold}${inputLine}${COLOR.reset}`, width));
     } else if (isOtherHighlighted) {
-      const content = " > Other (自定义输入)...";
-      lines.push(`\x1b[7m${COLOR.bold}${this.padRight(content, width)}${COLOR.reset}`);
+      const content = `${COLOR.selectedText}${COLOR.bold}Other${COLOR.reset}${COLOR.selectedSubtle} (自定义输入)...${COLOR.reset}`;
+      lines.push(this.renderSelectedRow(content, width));
     } else {
       lines.push(`   ${COLOR.secondary}Other (自定义输入)...${COLOR.reset}`);
     }
@@ -1569,17 +1570,23 @@ class TypeScriptTui {
     return text + " ".repeat(width - visible);
   }
 
+  private renderSelectedRow(content: string, width: number, marker = "›"): string {
+    const inner = `${COLOR.selectedBorder}${COLOR.bold}${marker} ${COLOR.reset}${content}`;
+    return `${COLOR.selectedBg}${this.padRight(inner, width)}${COLOR.reset}`;
+  }
+
   // ── End Markdown renderer ─────────────────────────────────────
 
   private renderToolBlock(tool: ToolCall, width: number): string[] {
     const lines: string[] = [];
     const selected = tool.id === this.selectedToolId;
-    const prefix = `${selected ? `${COLOR.accent}${COLOR.bold}` : `${COLOR.accent}`}${selected ? "▸" : "⏺"} ${COLOR.reset}`;
+    const prefix = `${selected ? `${COLOR.selectedBorder}${COLOR.bold}` : `${COLOR.accent}`}${selected ? "▸" : "⏺"} ${COLOR.reset}`;
     const bodyWidth = Math.max(12, width - 2);
     const summary = this.formatToolSummary(tool, bodyWidth);
 
     for (const line of this.wrapAnsiAware(summary, bodyWidth)) {
-      lines.push(`${prefix}${line}`);
+      const composed = `${prefix}${selected ? `${COLOR.selectedText}${line}${COLOR.reset}` : line}`;
+      lines.push(selected ? `${COLOR.selectedBg}${this.padRight(composed, width)}${COLOR.reset}` : composed);
     }
 
     if (tool.expanded) {
