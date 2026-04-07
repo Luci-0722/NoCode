@@ -560,6 +560,7 @@ class MultiAgentStore:
             or "nocode"
         )
         self._acp_agents_cache: list[dict[str, Any]] = []
+        self._last_target_ids: list[str] = []
         self._registry_path = _resolve_registry_dir(config) / f"{self._summary.id}.json"
         self._restore_snapshot(snapshot or {})
 
@@ -884,7 +885,16 @@ class MultiAgentStore:
     def _resolve_targets(self, mentions: list[str]) -> list[ManagedAgent]:
         if not mentions:
             with self._lock:
-                return list(self._agents.values())
+                if self._last_target_ids:
+                    return [
+                        self._agents[aid]
+                        for aid in self._last_target_ids
+                        if aid in self._agents
+                    ]
+                agents = list(self._agents.values())
+                if agents:
+                    return [agents[0]]
+                return []
 
         resolved: list[ManagedAgent] = []
         seen: set[str] = set()
@@ -894,6 +904,8 @@ class MultiAgentStore:
                 continue
             seen.add(agent.summary.id)
             resolved.append(agent)
+        if resolved:
+            self._last_target_ids = [a.summary.id for a in resolved]
         return resolved
 
     async def _deliver(self, agent_id: str, delivery: Delivery, run_id: str) -> None:

@@ -21,7 +21,6 @@ dependencies = [
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 
 [project.scripts]
-nocode = "nocode_agent.main:main"
 nocode-acp = "nocode_agent.acp_server:main"
 nocode-web = "multiagent_system.server:main"
 

@@ -171,7 +171,7 @@ function setComposerHint() {
     composerHint.textContent = "讨论进行中。点击“停止讨论”可以中断当前 agent 运行。";
     return;
   }
-  composerHint.textContent = "未写 `@` 时会广播给全部 agent。";
+  composerHint.textContent = "未写 `@` 时会发送给上一个对话的 agent。";
 }
 
 function openSettings() {
