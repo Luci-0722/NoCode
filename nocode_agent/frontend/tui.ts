@@ -118,6 +118,11 @@ const COLOR = {
   },
 };
 
+const ENABLE_KITTY_KEYBOARD = "\x1b[>1u";
+const DISABLE_KITTY_KEYBOARD = "\x1b[<u";
+const ENABLE_MODIFY_OTHER_KEYS = "\x1b[>4;2m";
+const DISABLE_MODIFY_OTHER_KEYS = "\x1b[>4m";
+
 class TypeScriptTui {
   private readonly version = "NoCode";
   private readonly history: Message[] = [];
@@ -1877,7 +1882,8 @@ class TypeScriptTui {
 
   private enterAltScreen(): void {
     // 禁用鼠标上报，保留终端原生文本选区与复制行为。
-    process.stdout.write("\x1b[?1049h\x1b[?25h");
+    // 同时启用扩展键盘协议，让 Shift+Enter 等组合键能与普通 Enter 区分。
+    process.stdout.write(`\x1b[?1049h\x1b[?25h${ENABLE_KITTY_KEYBOARD}${ENABLE_MODIFY_OTHER_KEYS}`);
   }
 
   private scrollTranscript(delta: number): void {
@@ -1917,7 +1923,7 @@ class TypeScriptTui {
   }
 
   private shutdown(): void {
-    process.stdout.write("\x1b[?25h\x1b[?1049l");
+    process.stdout.write(`${DISABLE_MODIFY_OTHER_KEYS}${DISABLE_KITTY_KEYBOARD}\x1b[?25h\x1b[?1049l`);
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(false);
     }
