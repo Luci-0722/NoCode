@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -340,7 +340,7 @@ class TypeScriptTui {
     if (raw === "1" || raw === "true" || raw === "on") {
       return true;
     }
-    return !this.xtermJsLike;
+    return true;
   }
 
   private getNativeSelectionHint(): string {
@@ -775,9 +775,30 @@ class TypeScriptTui {
   /** 复制选区到系统剪贴板 */
   private copySelectionToClipboard(): void {
     if (!this.selectedText) return;
+    this.copySelectionToNativeClipboard(this.selectedText);
     // 使用 OSC 52 剪贴板协议
     const base64 = Buffer.from(this.selectedText).toString("base64");
     process.stdout.write(`\x1b]52;c;${base64}\x07`);
+  }
+
+  private copySelectionToNativeClipboard(text: string): void {
+    if (process.env.SSH_CONNECTION) {
+      return;
+    }
+    if (process.platform === "darwin") {
+      const child = execFile("pbcopy", (error) => {
+        void error;
+      });
+      child.stdin?.end(text);
+      return;
+    }
+    if (process.platform === "win32") {
+      const child = execFile("clip", (error) => {
+        void error;
+      });
+      child.stdin?.end(text);
+      return;
+    }
   }
 
   private looksLikeMouseSequence(chunk: string): boolean {
