@@ -100,6 +100,24 @@ def _normalize_subagent_type(agent_name: str) -> str:
     return mapping.get(agent_name, agent_name or "subagent")
 
 
+def _subagent_key_from_namespace(namespace: tuple[str, ...]) -> tuple[str, ...]:
+    if not namespace:
+        return ()
+    return (namespace[0],)
+
+
+def _parent_tool_call_id_from_namespace(namespace: tuple[str, ...]) -> str:
+    if not namespace:
+        return ""
+    head = namespace[0]
+    if ":" not in head:
+        return ""
+    node_name, task_id = head.split(":", 1)
+    if node_name != "tools":
+        return ""
+    return task_id
+
+
 class MainAgent:
     """主代理负责协调工具和子代理。"""
 
@@ -147,10 +165,8 @@ class MainAgent:
         logger.debug("chat() called: thread=%s, input=%s", self._thread_id[:20], user_input[:200])
         await self._checkpointer.ensure_setup()
         config = {"configurable": {"thread_id": self._thread_id}}
-        active_delegate_calls: list[str] = []
-        subgraph_parent_by_ns: dict[tuple[str, ...], str] = {}
-        subgraph_meta_by_ns: dict[tuple[str, ...], dict[str, str]] = {}
-        subgraph_text_by_ns: dict[tuple[str, ...], list[str]] = {}
+        subgraph_meta_by_key: dict[tuple[str, ...], dict[str, str]] = {}
+        subgraph_text_by_key: dict[tuple[str, ...], list[str]] = {}
 
         max_retries = 5
         base_delay = 2.0
@@ -171,11 +187,16 @@ class MainAgent:
                         token, metadata = chunk["data"]
                         agent_name = str(metadata.get("lc_agent_name") or "")
                         if namespace and agent_name and agent_name != "mainagent_supervisor":
-                            if namespace not in subgraph_parent_by_ns and active_delegate_calls:
-                                parent_tool_call_id = active_delegate_calls[-1]
-                                subgraph_parent_by_ns[namespace] = parent_tool_call_id
-                                subgraph_meta_by_ns[namespace] = {
-                                    "subagent_id": " / ".join(namespace),
+                            subagent_key = _subagent_key_from_namespace(namespace)
+                            parent_tool_call_id = _parent_tool_call_id_from_namespace(namespace)
+                            if (
+                                subagent_key
+                                and parent_tool_call_id
+                                and subagent_key not in subgraph_meta_by_key
+                            ):
+                                subgraph_meta_by_key[subagent_key] = {
+                                    "parent_tool_call_id": parent_tool_call_id,
+                                    "subagent_id": " / ".join(subagent_key),
                                     "subagent_type": _normalize_subagent_type(agent_name),
                                 }
                                 yield (
@@ -183,13 +204,13 @@ class MainAgent:
                                     {
                                         "type": "subagent_start",
                                         "parent_tool_call_id": parent_tool_call_id,
-                                        "subagent_id": " / ".join(namespace),
+                                        "subagent_id": " / ".join(subagent_key),
                                         "subagent_type": _normalize_subagent_type(agent_name),
-                                        "thread_id": " / ".join(namespace),
+                                        "thread_id": " / ".join(subagent_key),
                                     },
                                 )
-                            if isinstance(token, AIMessageChunk) and token.text and namespace in subgraph_parent_by_ns:
-                                subgraph_text_by_ns.setdefault(namespace, []).append(token.text)
+                            if isinstance(token, AIMessageChunk) and token.text and subagent_key in subgraph_meta_by_key:
+                                subgraph_text_by_key.setdefault(subagent_key, []).append(token.text)
                             continue
 
                         if metadata.get("langgraph_node") != "model":
@@ -211,16 +232,17 @@ class MainAgent:
                         if step == "model":
                             for message in new_messages:
                                 if isinstance(message, AIMessage):
-                                    if namespace and namespace in subgraph_parent_by_ns:
-                                        parent_tool_call_id = subgraph_parent_by_ns[namespace]
-                                        subgraph_meta = subgraph_meta_by_ns.get(namespace, {})
+                                    subagent_key = _subagent_key_from_namespace(namespace)
+                                    if subagent_key and subagent_key in subgraph_meta_by_key:
+                                        subgraph_meta = subgraph_meta_by_key.get(subagent_key, {})
+                                        parent_tool_call_id = subgraph_meta.get("parent_tool_call_id", "")
                                         for tool_call in message.tool_calls:
                                             yield (
                                                 "subagent_tool_start",
                                                 {
                                                     "type": "subagent_tool_start",
                                                     "parent_tool_call_id": parent_tool_call_id,
-                                                    "subagent_id": subgraph_meta.get("subagent_id", " / ".join(namespace)),
+                                                    "subagent_id": subgraph_meta.get("subagent_id", " / ".join(subagent_key)),
                                                     "subagent_type": subgraph_meta.get("subagent_type", "subagent"),
                                                     "name": tool_call["name"],
                                                     "args": tool_call.get("args", {}),
@@ -232,8 +254,6 @@ class MainAgent:
                                         # 通知 SM extractor 有工具调用
                                         if self._sm_extractor:
                                             self._sm_extractor.notify_tool_call()
-                                        if tool_call["name"] == "delegate_code":
-                                            active_delegate_calls.append(str(tool_call.get("id", "") or ""))
                                         yield (
                                             "tool_start",
                                             tool_call["name"],
@@ -243,15 +263,16 @@ class MainAgent:
                         elif step == "tools":
                             for message in new_messages:
                                 if isinstance(message, ToolMessage):
-                                    if namespace and namespace in subgraph_parent_by_ns:
-                                        parent_tool_call_id = subgraph_parent_by_ns[namespace]
-                                        subgraph_meta = subgraph_meta_by_ns.get(namespace, {})
+                                    subagent_key = _subagent_key_from_namespace(namespace)
+                                    if subagent_key and subagent_key in subgraph_meta_by_key:
+                                        subgraph_meta = subgraph_meta_by_key.get(subagent_key, {})
+                                        parent_tool_call_id = subgraph_meta.get("parent_tool_call_id", "")
                                         yield (
                                             "subagent_tool_end",
                                             {
                                                 "type": "subagent_tool_end",
                                                 "parent_tool_call_id": parent_tool_call_id,
-                                                "subagent_id": subgraph_meta.get("subagent_id", " / ".join(namespace)),
+                                                "subagent_id": subgraph_meta.get("subagent_id", " / ".join(subagent_key)),
                                                 "subagent_type": subgraph_meta.get("subagent_type", "subagent"),
                                                 "name": message.name or "tool",
                                                 "output": _render_tool_output(message.content),
@@ -265,27 +286,26 @@ class MainAgent:
 
                                     tool_call_id = getattr(message, "tool_call_id", "")
                                     if (message.name or "") == "delegate_code":
-                                        finished_namespaces = [
-                                            ns for ns, parent_id in subgraph_parent_by_ns.items()
-                                            if parent_id == str(tool_call_id or "")
+                                        finished_keys = [
+                                            key
+                                            for key, meta in subgraph_meta_by_key.items()
+                                            if meta.get("parent_tool_call_id") == str(tool_call_id or "")
                                         ]
-                                        for ns in finished_namespaces:
-                                            subgraph_meta = subgraph_meta_by_ns.get(ns, {})
-                                            summary = "".join(subgraph_text_by_ns.get(ns, [])).strip()
+                                        for subagent_key in finished_keys:
+                                            subgraph_meta = subgraph_meta_by_key.get(subagent_key, {})
+                                            summary = "".join(subgraph_text_by_key.get(subagent_key, [])).strip()
                                             yield (
                                                 "subagent_finish",
                                                 {
                                                     "type": "subagent_finish",
                                                     "parent_tool_call_id": str(tool_call_id or ""),
-                                                    "subagent_id": subgraph_meta.get("subagent_id", " / ".join(ns)),
+                                                    "subagent_id": subgraph_meta.get("subagent_id", " / ".join(subagent_key)),
                                                     "subagent_type": subgraph_meta.get("subagent_type", "subagent"),
                                                     "summary": _render_tool_output(summary),
                                                 },
                                             )
-                                            subgraph_parent_by_ns.pop(ns, None)
-                                            subgraph_meta_by_ns.pop(ns, None)
-                                            subgraph_text_by_ns.pop(ns, None)
-                                        active_delegate_calls = [cid for cid in active_delegate_calls if cid != str(tool_call_id or "")]
+                                            subgraph_meta_by_key.pop(subagent_key, None)
+                                            subgraph_text_by_key.pop(subagent_key, None)
 
                                     yield (
                                         "tool_end",

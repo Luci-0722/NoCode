@@ -185,6 +185,89 @@ const SGR_MOUSE_RE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
 // 选区颜色（半透明蓝底）
 const SELECTION_BG = "\x1b[48;2;40;70;110m";
 
+const WHEEL_ACCEL_WINDOW_MS = 40;
+const WHEEL_ACCEL_STEP = 0.3;
+const WHEEL_ACCEL_MAX = 6;
+const WHEEL_DECAY_HALFLIFE_MS = 150;
+const WHEEL_DECAY_STEP = 5;
+const WHEEL_BURST_MS = 5;
+const WHEEL_DECAY_GAP_MS = 80;
+const WHEEL_DECAY_CAP_SLOW = 3;
+const WHEEL_DECAY_CAP_FAST = 6;
+const WHEEL_DECAY_IDLE_MS = 500;
+
+type WheelAccelState = {
+  time: number;
+  mult: number;
+  dir: 0 | 1 | -1;
+  xtermJs: boolean;
+  frac: number;
+  base: number;
+};
+
+function isXtermJsLike(): boolean {
+  return process.env.TERM_PROGRAM === "vscode"
+    || process.env.CURSOR_TRACE_ID !== undefined
+    || process.env.WINDSURF_SESSION_ID !== undefined
+    || process.env.VSCODE_GIT_IPC_HANDLE !== undefined;
+}
+
+function readScrollSpeedBase(): number {
+  const raw = process.env.NOCODE_SCROLL_SPEED || process.env.CLAUDE_CODE_SCROLL_SPEED;
+  if (!raw) return 1;
+  const value = Number.parseFloat(raw);
+  if (Number.isNaN(value) || value <= 0) {
+    return 1;
+  }
+  return Math.min(value, 20);
+}
+
+function initWheelAccelState(): WheelAccelState {
+  const base = readScrollSpeedBase();
+  return {
+    time: 0,
+    mult: base,
+    dir: 0,
+    xtermJs: isXtermJsLike(),
+    frac: 0,
+    base,
+  };
+}
+
+function computeWheelStep(state: WheelAccelState, dir: 1 | -1, now: number): number {
+  const gap = now - state.time;
+  if (!state.xtermJs) {
+    if (dir !== state.dir || gap > WHEEL_ACCEL_WINDOW_MS) {
+      state.mult = state.base;
+    } else {
+      const cap = Math.max(WHEEL_ACCEL_MAX, state.base * 2);
+      state.mult = Math.min(cap, state.mult + WHEEL_ACCEL_STEP);
+    }
+    state.dir = dir;
+    state.time = now;
+    return Math.max(1, Math.floor(state.mult));
+  }
+
+  const sameDir = dir === state.dir;
+  state.time = now;
+  state.dir = dir;
+  if (sameDir && gap < WHEEL_BURST_MS) {
+    return 1;
+  }
+  if (!sameDir || gap > WHEEL_DECAY_IDLE_MS) {
+    state.mult = Math.max(2, state.base);
+    state.frac = 0;
+  } else {
+    const m = Math.pow(0.5, gap / WHEEL_DECAY_HALFLIFE_MS);
+    const cap = gap >= WHEEL_DECAY_GAP_MS ? WHEEL_DECAY_CAP_SLOW : WHEEL_DECAY_CAP_FAST;
+    state.mult = Math.min(cap, 1 + (state.mult - 1) * m + WHEEL_DECAY_STEP * m);
+  }
+  const total = state.mult + state.frac;
+  const rows = Math.max(1, Math.floor(total));
+  state.frac = total - rows;
+  return rows;
+}
+
 class TypeScriptTui {
   private readonly version = "NoCode";
   private readonly history: Message[] = [];
@@ -238,9 +321,30 @@ class TypeScriptTui {
   } | null = null;
   private selectedText = "";    // 最后一次选中的纯文本
   private selectionRanges: Array<{ row: number; startCol: number; endCol: number }> = [];
+  private readonly wheelAccel = initWheelAccelState();
+  private readonly xtermJsLike = isXtermJsLike();
+  private readonly copyOnSelect = this.readCopyOnSelect();
 
   constructor() {
     this.resumeMode = process.argv.includes("--resume");
+  }
+
+  private readCopyOnSelect(): boolean {
+    const raw = process.env.NOCODE_COPY_ON_SELECT?.trim().toLowerCase();
+    if (raw === "0" || raw === "false" || raw === "off") {
+      return false;
+    }
+    if (raw === "1" || raw === "true" || raw === "on") {
+      return true;
+    }
+    return !this.xtermJsLike;
+  }
+
+  private getNativeSelectionHint(): string {
+    if (this.xtermJsLike) {
+      return process.platform === "darwin" ? "Option+拖拽原生选择" : "Shift+拖拽原生选择";
+    }
+    return "Shift+拖拽原生选择";
   }
 
   async start(): Promise<void> {
@@ -512,11 +616,21 @@ class TypeScriptTui {
       const isRelease = sgrMatch[4] === "m";
       const isWheel = (button & 0x40) !== 0;
       const isMotion = (button & 0x20) !== 0;
+      const hasShift = (button & 0x04) !== 0;
+      const hasMeta = (button & 0x08) !== 0;
 
       if (isWheel) {
         const direction = (button & 0x01) !== 0 ? -1 : 1;
-        this.scrollTranscript(direction * 3);
+        const step = computeWheelStep(this.wheelAccel, direction as 1 | -1, Date.now());
+        this.scrollTranscript(direction * step);
         return true;
+      }
+
+      if (hasShift || hasMeta) {
+        // 为终端保留原生选区手势，避免与自绘选区抢占同一套交互。
+        this.clearSelection();
+        this.render();
+        return false;
       }
 
       const buttonId = button & 0x03;
@@ -535,7 +649,8 @@ class TypeScriptTui {
       const button = chunk.charCodeAt(3) - 32;
       if ((button & 0x40) !== 0) {
         const direction = (button & 0x01) !== 0 ? -1 : 1;
-        this.scrollTranscript(direction * 3);
+        const step = computeWheelStep(this.wheelAccel, direction as 1 | -1, Date.now());
+        this.scrollTranscript(direction * step);
       }
       return true;
     }
@@ -592,8 +707,9 @@ class TypeScriptTui {
         this.selectedText = "";
       } else {
         this.selectedText = this.getSelectedTextFromRanges();
-        // 尝试复制到剪贴板
-        this.copySelectionToClipboard();
+        if (this.copyOnSelect) {
+          this.copySelectionToClipboard();
+        }
       }
       this.render();
       return;
@@ -916,7 +1032,7 @@ class TypeScriptTui {
       this.pushHistory({
         kind: "message",
         role: "system",
-        content: "Commands: /help /clear /session /resume [/continue] /quit\nESC 清空输入 / 中断生成\nEnter 发送，Shift+Enter 换行\n鼠标滚轮上下滚动；拖拽可选中文本并自动复制，Ctrl+C 可复制当前选区\nCtrl+J/K 或 Alt+J/K 选择工具，Ctrl+O 或 Alt+O 展开工具\n/resume 支持直接输入 thread id 后缀或预览关键词进行过滤恢复",
+        content: `Commands: /help /clear /session /resume [/continue] /quit\nESC 清空输入 / 中断生成\nEnter 发送，Shift+Enter 换行\n鼠标滚轮支持加速度滚动；拖拽可选择文本${this.copyOnSelect ? "并自动复制" : "，按 Ctrl+C 复制"}\n${this.getNativeSelectionHint()}\nCtrl+J/K 或 Alt+J/K 选择工具，Ctrl+O 或 Alt+O 展开工具\n/resume 支持直接输入 thread id 后缀或预览关键词进行过滤恢复\n环境变量: NOCODE_COPY_ON_SELECT=0/1, NOCODE_SCROLL_SPEED=<number>`,
       });
       this.render();
       return;
@@ -2306,8 +2422,11 @@ class TypeScriptTui {
     const state = this.generating ? "busy" : "idle";
     const queue = this.pendingPrompts.length > 0 ? `  queue ${this.pendingPrompts.length}` : "";
     const scroll = this.scrollOffset > 0 ? `  scroll +${this.scrollOffset}` : "";
-    const selection = this.selectedText ? "  selection copied/ctrl+c" : "";
-    const text = `Enter submit  Shift+Enter newline  Wheel/PgUp/PgDn scroll  Ctrl+J/K tool  Ctrl+O expand  ${state}${queue}${selection}  ${this.subagentModel}${scroll}`;
+    const selection = this.selectedText
+      ? (this.copyOnSelect ? "  selection copied" : "  selection ctrl+c")
+      : `  ${this.getNativeSelectionHint()}`;
+    const wheelMode = this.xtermJsLike ? "wheel decay" : "wheel native";
+    const text = `Enter submit  Shift+Enter newline  Wheel/PgUp/PgDn scroll  Ctrl+J/K tool  Ctrl+O expand  ${wheelMode}${selection}  ${state}${queue}  ${this.subagentModel}${scroll}`;
     return ["", `${COLOR.secondary}${this.truncate(text, width)}${COLOR.reset}`];
   }
 
