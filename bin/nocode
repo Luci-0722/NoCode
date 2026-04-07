@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# NoCode Agent - TUI launcher
+# Usage: nocode [--resume]
+
+PROJECT_DIR="/Users/lucheng/Projects/NoCode"
+TUI_PATH="$PROJECT_DIR/nocode_agent/frontend/tui.ts"
+
+export ZHIPU_API_KEY="${ZHIPU_API_KEY:-$(cat ~/.config/nocode/api_key 2>/dev/null || echo '')}"
+
+if [ -z "$ZHIPU_API_KEY" ]; then
+    echo "Error: ZHIPU_API_KEY is not set."
+    echo "  export ZHIPU_API_KEY=your-key"
+    echo "  Or save to ~/.config/nocode/api_key"
+    exit 1
+fi
+
+cd "$PROJECT_DIR"
+exec node --experimental-strip-types "$TUI_PATH" "$@"
