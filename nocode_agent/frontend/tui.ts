@@ -939,6 +939,14 @@ class TypeScriptTui {
         this.model = event.model;
         this.subagentModel = event.subagent_model;
         this.cwd = event.cwd;
+        this.history.length = 0;
+        this.streaming = "";
+        this.pendingPrompts.length = 0;
+        this.generating = false;
+        this.selectedToolId = null;
+        this.followLatestTool = true;
+        this.scrollOffset = 0;
+        this.clearSelection();
         this.showSessionPicker = false;
         this.sendBackend({ type: "load_history" });
         break;
