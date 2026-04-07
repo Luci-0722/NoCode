@@ -174,6 +174,16 @@ const DISABLE_KITTY_KEYBOARD = "\x1b[<u";
 const ENABLE_MODIFY_OTHER_KEYS = "\x1b[>4;2m";
 const DISABLE_MODIFY_OTHER_KEYS = "\x1b[>4m";
 
+// 鼠标跟踪：1000 基础按钮/滚轮，1002 拖拽，1003 全移动，1006 SGR 编码
+const ENABLE_MOUSE_TRACKING = "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
+const DISABLE_MOUSE_TRACKING = "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+
+// SGR 鼠标事件正则：CSI < button ; col ; row M/m
+const SGR_MOUSE_RE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
+
+// 选区颜色（半透明蓝底）
+const SELECTION_BG = "\x1b[48;2;40;70;110m";
+
 class TypeScriptTui {
   private readonly version = "NoCode";
   private readonly history: Message[] = [];
@@ -214,6 +224,17 @@ class TypeScriptTui {
   private otherMode = false;
   private otherText = "";
   private questionAnswers: QuestionAnswer[] = [];
+
+  // ── 鼠标选区状态 ─────────────────────────────────────
+  private mouseSelection: {
+    active: boolean;
+    anchorRow: number;   // 1-indexed 终端行号
+    anchorCol: number;   // 1-indexed 终端列号
+    focusRow: number;
+    focusCol: number;
+  } | null = null;
+  private selectedText = "";    // 最后一次选中的纯文本
+  private selectionRanges: Array<{ row: number; startCol: number; endCol: number }> = [];
 
   constructor() {
     this.resumeMode = process.argv.includes("--resume");
@@ -429,6 +450,11 @@ class TypeScriptTui {
       process.exit(0);
     }
 
+    // 处理鼠标事件（包括滚轮和选区），如果匹配则不再传递给键盘处理
+    if (this.tryHandleMouseEvent(chunk)) {
+      return;
+    }
+
     if (this.isEscapeSequence(chunk)) {
       this.handleEscape();
       return;
@@ -441,8 +467,158 @@ class TypeScriptTui {
       return;
     }
 
-    // 保留原始键盘输入，不再拦截鼠标事件，交给终端原生选区与复制处理。
     this.flushKeyboardInput(chunk);
+  }
+
+  /** 尝试处理鼠标事件，返回 true 表示已处理 */
+  private tryHandleMouseEvent(chunk: string): boolean {
+    // SGR 格式：ESC [ < button ; col ; row M/m
+    const sgrMatch = SGR_MOUSE_RE.exec(chunk);
+    if (sgrMatch) {
+      const button = parseInt(sgrMatch[1], 10);
+      const col = parseInt(sgrMatch[2], 10);
+      const row = parseInt(sgrMatch[3], 10);
+      const isRelease = sgrMatch[4] === "m";
+      const isWheel = (button & 0x40) !== 0;
+      const isMotion = (button & 0x20) !== 0;
+
+      if (isWheel) {
+        const direction = (button & 0x01) !== 0 ? -1 : 1;
+        this.scrollTranscript(direction * 3);
+        return true;
+      }
+
+      const buttonId = button & 0x03;
+      if (isRelease) {
+        this.handleMouseAction(buttonId, col, row, "release");
+      } else if (isMotion) {
+        this.handleMouseAction(buttonId, col, row, "move");
+      } else {
+        this.handleMouseAction(buttonId, col, row, "press");
+      }
+      return true;
+    }
+
+    // X10 格式：ESC M + 3 字节（仅处理滚轮）
+    if (chunk.length === 6 && chunk.startsWith("\x1b[M")) {
+      const button = chunk.charCodeAt(3) - 32;
+      if ((button & 0x40) !== 0) {
+        const direction = (button & 0x01) !== 0 ? -1 : 1;
+        this.scrollTranscript(direction * 3);
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  /** 处理鼠标点击/拖拽/释放事件 */
+  private handleMouseAction(button: number, col: number, row: number, action: "press" | "release" | "move"): void {
+
+    if (action === "press" && button === 0) {
+      // 左键按下：开始选区
+      this.mouseSelection = { active: true, anchorRow: row, anchorCol: col, focusRow: row, focusCol: col };
+      this.selectionRanges = this.computeSelectionRanges(this.mouseSelection);
+      this.selectedText = "";
+      this.render();
+      return;
+    }
+
+    if (action === "move" && this.mouseSelection?.active) {
+      // 拖拽中：更新选区
+      this.mouseSelection.focusRow = row;
+      this.mouseSelection.focusCol = col;
+      this.selectionRanges = this.computeSelectionRanges(this.mouseSelection);
+
+      // 如果拖到边缘，自动滚动
+      const height = process.stdout.rows || 40;
+      const headerHeight = this.renderHeader(process.stdout.columns || 120).length;
+      const composerHeight = this.renderComposer(process.stdout.columns || 120).length;
+      const footerHeight = this.renderFooter(process.stdout.columns || 120).length;
+      const transcriptTop = headerHeight + 1;
+      const transcriptBottom = height - composerHeight - footerHeight;
+      if (row <= transcriptTop) {
+        this.scrollTranscript(2);
+      } else if (row >= transcriptBottom) {
+        this.scrollTranscript(-2);
+      }
+
+      this.render();
+      return;
+    }
+
+    if (action === "release" && this.mouseSelection?.active) {
+      // 释放：完成选区
+      this.mouseSelection.focusRow = row;
+      this.mouseSelection.focusCol = col;
+      this.mouseSelection.active = false;
+
+      // 如果几乎没有选中内容（点击未拖拽），清除选区
+      const sel = this.mouseSelection;
+      if (Math.abs(sel.anchorRow - sel.focusRow) === 0 && Math.abs(sel.anchorCol - sel.focusCol) <= 1) {
+        this.mouseSelection = null;
+        this.selectionRanges = [];
+        this.selectedText = "";
+      } else {
+        this.selectedText = this.getSelectedTextFromRanges();
+        // 尝试复制到剪贴板
+        this.copySelectionToClipboard();
+      }
+      this.render();
+      return;
+    }
+  }
+
+  /** 根据选区状态计算受影响的行范围 */
+  private computeSelectionRanges(sel: { anchorRow: number; anchorCol: number; focusRow: number; focusCol: number }): Array<{ row: number; startCol: number; endCol: number }> {
+    const ranges: Array<{ row: number; startCol: number; endCol: number }> = [];
+    const minRow = Math.min(sel.anchorRow, sel.focusRow);
+    const maxRow = Math.max(sel.anchorRow, sel.focusRow);
+    const isAnchorFirst = sel.anchorRow < sel.focusRow || (sel.anchorRow === sel.focusRow && sel.anchorCol <= sel.focusCol);
+
+    for (let r = minRow; r <= maxRow; r++) {
+      let startCol: number;
+      let endCol: number;
+      if (minRow === maxRow) {
+        startCol = Math.min(sel.anchorCol, sel.focusCol);
+        endCol = Math.max(sel.anchorCol, sel.focusCol);
+      } else if (r === minRow) {
+        startCol = isAnchorFirst ? sel.anchorCol : sel.focusCol;
+        endCol = process.stdout.columns || 120;
+      } else if (r === maxRow) {
+        startCol = 1;
+        endCol = isAnchorFirst ? sel.focusCol : sel.anchorCol;
+      } else {
+        startCol = 1;
+        endCol = process.stdout.columns || 120;
+      }
+      ranges.push({ row: r, startCol, endCol });
+    }
+    return ranges;
+  }
+
+  /** 从选区范围提取纯文本（从当前渲染帧中） */
+  private getSelectedTextFromRanges(): string {
+    if (this.selectionRanges.length === 0) return "";
+    // 从 lastFrame 中提取对应行
+    const frameLines = this.lastFrame.split("\n");
+    const parts: string[] = [];
+    for (const range of this.selectionRanges) {
+      const lineIndex = range.row - 1;
+      if (lineIndex >= 0 && lineIndex < frameLines.length) {
+        const line = this.stripAnsi(frameLines[lineIndex]);
+        parts.push(line.slice(Math.max(0, range.startCol - 1), range.endCol));
+      }
+    }
+    return parts.join("\n");
+  }
+
+  /** 复制选区到系统剪贴板 */
+  private copySelectionToClipboard(): void {
+    if (!this.selectedText) return;
+    // 使用 OSC 52 剪贴板协议
+    const base64 = Buffer.from(this.selectedText).toString("base64");
+    process.stdout.write(`\x1b]52;c;${base64}\x07`);
   }
 
   private isShiftEnterSequence(chunk: string): boolean {
@@ -688,7 +864,7 @@ class TypeScriptTui {
       this.pushHistory({
         kind: "message",
         role: "system",
-        content: "Commands: /help /clear /session /quit\nESC clear input / interrupt agent\nEnter submits\nShift+Enter inserts newline\nwheel/PgUp/PgDn 滚动\nCtrl+J/K select tool  Ctrl+O expand tool result\n启动时加 --resume 可选择历史会话恢复",
+        content: "Commands: /help /clear /session /quit\nESC clear input / interrupt agent\nEnter submits\nShift+Enter inserts newline\nScroll/PgUp/PgDn 滚动  鼠标拖拽选择并自动复制\nAlt+J/K select tool  Alt+O expand tool result\n启动时加 --resume 可选择历史会话恢复",
       });
       this.render();
       return;
@@ -1377,6 +1553,7 @@ class TypeScriptTui {
         process.stdout.write(frame);
         this.lastFrame = frame;
       }
+      this.renderSelectionOverlay();
       return;
     }
 
@@ -1393,6 +1570,7 @@ class TypeScriptTui {
         process.stdout.write(frame);
         this.lastFrame = frame;
       }
+      this.renderSelectionOverlay();
       return;
     }
 
@@ -1410,7 +1588,31 @@ class TypeScriptTui {
       this.lastFrame = frame;
     }
 
+    this.renderSelectionOverlay();
     this.positionCursor(width, header.length + transcript.length);
+  }
+
+  /** 在已渲染的帧上叠加选区高亮 */
+  private renderSelectionOverlay(): void {
+    if (this.selectionRanges.length === 0) return;
+    const width = process.stdout.columns || 120;
+    const frameLines = this.lastFrame.split("\n");
+
+    for (const range of this.selectionRanges) {
+      const lineIndex = range.row - 1;
+      if (lineIndex < 0 || lineIndex >= frameLines.length) continue;
+      const startCol = Math.max(1, range.startCol);
+      const endCol = Math.min(width, range.endCol);
+      if (startCol > endCol) continue;
+      // 移动光标到选区行的起始位置，用选区背景色覆盖
+      process.stdout.write(`\x1b[${range.row};${startCol}H${SELECTION_BG}`);
+      // 在选区背景上重新输出该行的可见字符
+      const line = frameLines[lineIndex];
+      const plainLine = this.stripAnsi(line);
+      const selectedPart = plainLine.slice(startCol - 1, endCol);
+      process.stdout.write(selectedPart);
+      process.stdout.write(COLOR.reset);
+    }
   }
 
   private renderHeader(width: number): string[] {
@@ -1995,7 +2197,7 @@ class TypeScriptTui {
     const state = this.generating ? "busy" : "idle";
     const queue = this.pendingPrompts.length > 0 ? `  queue ${this.pendingPrompts.length}` : "";
     const scroll = this.scrollOffset > 0 ? `  scroll +${this.scrollOffset}` : "";
-    const text = `Enter submit  Shift+Enter newline  wheel/PgUp/PgDn scroll  Ctrl+J/K tool  ${state}${queue}  ${this.subagentModel}${scroll}`;
+    const text = `Enter submit  Shift+Enter newline  Scroll/PgUp/PgDn scroll  Alt+J/K tool  ${state}${queue}  ${this.subagentModel}${scroll}`;
     return ["", `${COLOR.secondary}${this.truncate(text, width)}${COLOR.reset}`];
   }
 
@@ -2149,9 +2351,8 @@ class TypeScriptTui {
   }
 
   private enterAltScreen(): void {
-    // 禁用鼠标上报，保留终端原生文本选区与复制行为。
-    // 同时启用扩展键盘协议，让 Shift+Enter 等组合键能与普通 Enter 区分。
-    process.stdout.write(`\x1b[?1049h\x1b[?25h${ENABLE_KITTY_KEYBOARD}${ENABLE_MODIFY_OTHER_KEYS}`);
+    // 启用 alt screen、隐藏光标、扩展键盘协议、鼠标跟踪（滚轮+选区）
+    process.stdout.write(`\x1b[?1049h\x1b[?25h${ENABLE_KITTY_KEYBOARD}${ENABLE_MODIFY_OTHER_KEYS}${ENABLE_MOUSE_TRACKING}`);
   }
 
   private scrollTranscript(delta: number): void {
@@ -2191,7 +2392,7 @@ class TypeScriptTui {
   }
 
   private shutdown(): void {
-    process.stdout.write(`${DISABLE_MODIFY_OTHER_KEYS}${DISABLE_KITTY_KEYBOARD}\x1b[?25h\x1b[?1049l`);
+    process.stdout.write(`${DISABLE_MOUSE_TRACKING}${DISABLE_MODIFY_OTHER_KEYS}${DISABLE_KITTY_KEYBOARD}\x1b[?25h\x1b[?1049l`);
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(false);
     }
