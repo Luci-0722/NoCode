@@ -181,6 +181,9 @@ const DISABLE_MOUSE_TRACKING = "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
 
 // SGR 鼠标事件正则：CSI < button ; col ; row M/m
 const SGR_MOUSE_RE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
+const CTRL_J_SEQUENCES = new Set(["\x0a", "\x1b[106;5u", "\x1b[27;5;106~"]);
+const CTRL_K_SEQUENCES = new Set(["\x0b", "\x1b[107;5u", "\x1b[27;5;107~"]);
+const CTRL_O_SEQUENCES = new Set(["\x0f", "\x1b[111;5u", "\x1b[27;5;111~"]);
 
 // 选区颜色（半透明蓝底）
 const SELECTION_BG = "\x1b[48;2;40;70;110m";
@@ -578,16 +581,16 @@ class TypeScriptTui {
       this.leaveNativeSelectionMode();
     }
     if (!this.showSessionPicker && !this.questionMode) {
-      if (chunk === "\x0a") {
+      if (this.isCtrlJSequence(chunk)) {
         this.moveToolSelection(1);
         return;
       }
-      if (chunk === "\x0b") {
+      if (this.isCtrlKSequence(chunk)) {
         this.moveToolSelection(-1);
         return;
       }
     }
-    if (chunk === "\x0f") {
+    if (this.isCtrlOSequence(chunk)) {
       this.toggleSelectedTool();
       return;
     }
@@ -884,6 +887,18 @@ class TypeScriptTui {
       || chunk === "\x1b[99;6u"
       || chunk === "\x1b[27;5;99~"
       || chunk === "\x1b[27;6;99~";
+  }
+
+  private isCtrlJSequence(chunk: string): boolean {
+    return CTRL_J_SEQUENCES.has(chunk);
+  }
+
+  private isCtrlKSequence(chunk: string): boolean {
+    return CTRL_K_SEQUENCES.has(chunk);
+  }
+
+  private isCtrlOSequence(chunk: string): boolean {
+    return CTRL_O_SEQUENCES.has(chunk);
   }
 
   private isEscapeSequence(chunk: string): boolean {
