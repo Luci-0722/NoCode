@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -123,11 +123,19 @@ class TypeScriptTui {
   private exiting = false;
   private lastFrame = "";
   private scrollOffset = 0;
+  private rawInputBuffer = "";
   private readonly keyInput = new PassThrough();
   private nextMessageId = 1;
   private nextToolId = 1;
   private selectedToolId: number | null = null;
   private followLatestTool = true;
+  private selectionAnchor: { row: number; col: number } | null = null;
+  private selectionFocus: { row: number; col: number } | null = null;
+  private draggingSelection = false;
+  private lastTranscriptVisibleAnsi: string[] = [];
+  private lastTranscriptVisiblePlain: string[] = [];
+  private lastTranscriptBaseIndex = 0;
+  private lastTranscriptScreenStartRow = 0;
 
   // ── Resume / session picker state ──────────────────────────
   private readonly resumeMode: boolean;
@@ -231,7 +239,7 @@ class TypeScriptTui {
     process.stdin.setEncoding("utf8");
     this.keyInput.setEncoding("utf8");
     this.keyInput.on("keypress", (_str, key) => this.onKeypress(key));
-    process.stdin.on("data", (chunk: string | Buffer) => this.flushKeyboardInput(String(chunk)));
+    process.stdin.on("data", (chunk: string | Buffer) => this.onRawInput(String(chunk)));
   }
 
   private onKeypress(key: readline.Key): void {
@@ -266,6 +274,12 @@ class TypeScriptTui {
 
     // ── Normal input mode ─────────────────────────────────
     if (key.ctrl && key.name === "c") {
+      if (this.hasSelection()) {
+        this.copySelectionToClipboard();
+        this.clearSelection();
+        this.render();
+        return;
+      }
       this.exiting = true;
       this.shutdown();
       process.exit(0);
@@ -353,6 +367,91 @@ class TypeScriptTui {
     }
   }
 
+  private onRawInput(chunk: string): void {
+    this.rawInputBuffer += chunk;
+
+    while (this.rawInputBuffer.length > 0) {
+      const mouseStart = this.rawInputBuffer.indexOf("\x1b[<");
+
+      if (mouseStart === -1) {
+        this.flushKeyboardInput(this.rawInputBuffer);
+        this.rawInputBuffer = "";
+        return;
+      }
+
+      if (mouseStart > 0) {
+        this.flushKeyboardInput(this.rawInputBuffer.slice(0, mouseStart));
+        this.rawInputBuffer = this.rawInputBuffer.slice(mouseStart);
+      }
+
+      const match = this.rawInputBuffer.match(/^\x1b\[<(\d+);(\d+);(\d+)([Mm])/);
+      if (match) {
+        const code = Number.parseInt(match[1] || "", 10);
+        const col = Number.parseInt(match[2] || "", 10);
+        const row = Number.parseInt(match[3] || "", 10);
+        const kind = match[4] || "M";
+        if (!Number.isNaN(code) && !Number.isNaN(col) && !Number.isNaN(row)) {
+          this.handleMouseEvent(code, col, row, kind);
+        }
+        this.rawInputBuffer = this.rawInputBuffer.slice(match[0].length);
+        continue;
+      }
+
+      if (/^\x1b\[<[0-9;]*$/.test(this.rawInputBuffer)) {
+        return;
+      }
+
+      this.rawInputBuffer = this.rawInputBuffer.slice(1);
+    }
+  }
+
+  private handleMouseEvent(code: number, col: number, row: number, kind: string): void {
+    if (code === 64) {
+      this.scrollTranscript(3);
+      return;
+    }
+    if (code === 65) {
+      this.scrollTranscript(-3);
+      return;
+    }
+
+    if (this.showSessionPicker || this.questionMode) {
+      return;
+    }
+
+    const point = this.translateMouseToSelectionPoint(col, row);
+    if (!point) {
+      if (kind === "m") {
+        this.draggingSelection = false;
+      }
+      return;
+    }
+
+    const baseCode = code & 0b111111;
+    const isDrag = (code & 32) !== 0;
+    const isLeftButton = baseCode === 0 || (isDrag && (baseCode - 32) === 0);
+
+    if (kind === "M" && isLeftButton && !isDrag) {
+      this.selectionAnchor = point;
+      this.selectionFocus = point;
+      this.draggingSelection = true;
+      this.render();
+      return;
+    }
+
+    if (kind === "M" && isDrag && this.draggingSelection) {
+      this.selectionFocus = point;
+      this.render();
+      return;
+    }
+
+    if (kind === "m" && this.draggingSelection) {
+      this.selectionFocus = point;
+      this.draggingSelection = false;
+      this.render();
+    }
+  }
+
   private flushKeyboardInput(text: string): void {
     if (!text) {
       return;
@@ -385,6 +484,7 @@ class TypeScriptTui {
         this.pendingPrompts.length = 0;
         this.selectedToolId = null;
         this.followLatestTool = true;
+        this.clearSelection();
         this.scrollOffset = 0;
         break;
       case "text":
@@ -512,7 +612,7 @@ class TypeScriptTui {
       this.pushHistory({
         kind: "message",
         role: "system",
-        content: "Commands: /help /clear /session /quit\nESC clear input / interrupt agent\nEnter submits\nShift+Enter inserts newline\nCtrl+J/K select tool  Ctrl+O expand tool result\n鼠标可直接选中文本，滚动请使用 PgUp/PgDn\n启动时加 --resume 可选择历史会话恢复",
+        content: "Commands: /help /clear /session /quit\nESC clear input / interrupt agent\nEnter submits\nShift+Enter inserts newline\nwheel/PgUp/PgDn 滚动  drag 选择文本  Ctrl+C 复制选区\nCtrl+J/K select tool  Ctrl+O expand tool result\n启动时加 --resume 可选择历史会话恢复",
       });
       this.render();
       return;
@@ -1123,7 +1223,7 @@ class TypeScriptTui {
     const footer = this.renderFooter(width);
     const reserved = header.length + composer.length + footer.length;
     const transcriptHeight = Math.max(8, height - reserved);
-    const transcript = this.renderTranscript(width, transcriptHeight);
+    const transcript = this.renderTranscript(width, transcriptHeight, header.length);
     const frameLines = [...header, ...transcript, ...composer, ...footer];
     const frame = frameLines.join("\n");
 
@@ -1151,14 +1251,18 @@ class TypeScriptTui {
     ];
   }
 
-  private renderTranscript(width: number, height: number): string[] {
+  private renderTranscript(width: number, height: number, headerHeight: number): string[] {
     const blocks = this.buildTranscriptBlocks(width);
     const maxOffset = Math.max(0, blocks.length - height);
     this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxOffset));
     const start = Math.max(0, blocks.length - height - this.scrollOffset);
     const visible = blocks.slice(start, start + height);
+    this.lastTranscriptBaseIndex = start;
+    this.lastTranscriptVisibleAnsi = visible.slice();
+    this.lastTranscriptVisiblePlain = visible.map((line) => this.stripAnsi(line));
+    this.lastTranscriptScreenStartRow = headerHeight + 1;
     const lines: string[] = [];
-    lines.push(...visible);
+    lines.push(...this.applySelectionToVisibleTranscript(visible, start));
     while (lines.length < height) {
       lines.push("");
     }
@@ -1680,7 +1784,7 @@ class TypeScriptTui {
     const state = this.generating ? "busy" : "idle";
     const queue = this.pendingPrompts.length > 0 ? `  queue ${this.pendingPrompts.length}` : "";
     const scroll = this.scrollOffset > 0 ? `  scroll +${this.scrollOffset}` : "";
-    const text = `Enter submit  Shift+Enter newline  PgUp/PgDn scroll  Ctrl+J/K tool  Ctrl+O expand  text selectable  ${state}${queue}  ${this.subagentModel}${scroll}`;
+    const text = `Enter submit  Shift+Enter newline  wheel/PgUp/PgDn scroll  drag select  Ctrl+C copy selection  Ctrl+J/K tool  ${state}${queue}  ${this.subagentModel}${scroll}`;
     return ["", `${COLOR.secondary}${this.truncate(text, width)}${COLOR.reset}`];
   }
 
@@ -1756,6 +1860,144 @@ class TypeScriptTui {
 
   private stripAnsi(text: string): string {
     return text.replace(/\x1b\[[0-9;]*m/g, "");
+  }
+
+  private applySelectionToVisibleTranscript(lines: string[], baseIndex: number): string[] {
+    const range = this.getSelectionRange();
+    if (!range) {
+      return lines;
+    }
+
+    return lines.map((line, index) => {
+      const row = baseIndex + index;
+      if (row < range.start.row || row > range.end.row) {
+        return line;
+      }
+
+      const plain = this.stripAnsi(line);
+      const startCol = row === range.start.row ? range.start.col : 0;
+      const endCol = row === range.end.row ? range.end.col : this.visibleLength(plain);
+      if (endCol <= startCol) {
+        return line;
+      }
+      return this.highlightAnsiRange(line, startCol, endCol);
+    });
+  }
+
+  private highlightAnsiRange(line: string, startCol: number, endCol: number): string {
+    const [before, afterStart] = this.sliceByWidthAnsi(line, startCol);
+    const [selected, after] = this.sliceByWidthAnsi(afterStart, Math.max(0, endCol - startCol));
+    const highlighted = `${COLOR.selectedBg}${COLOR.selectedText}${this.stripAnsi(selected)}${COLOR.reset}`;
+    return `${before}${highlighted}${after}`;
+  }
+
+  private translateMouseToSelectionPoint(col: number, row: number): { row: number; col: number } | null {
+    const relativeRow = row - this.lastTranscriptScreenStartRow;
+    if (relativeRow < 0 || relativeRow >= this.lastTranscriptVisiblePlain.length) {
+      return null;
+    }
+    const text = this.lastTranscriptVisiblePlain[relativeRow] ?? "";
+    return {
+      row: this.lastTranscriptBaseIndex + relativeRow,
+      col: this.columnToTextIndex(text, Math.max(0, col - 1)),
+    };
+  }
+
+  private columnToTextIndex(text: string, column: number): number {
+    let visible = 0;
+    let index = 0;
+    for (const char of Array.from(text)) {
+      const width = this.charWidth(char);
+      if (visible >= column) {
+        break;
+      }
+      visible += width;
+      index += 1;
+      if (visible > column) {
+        break;
+      }
+    }
+    return index;
+  }
+
+  private getSelectionRange(): { start: { row: number; col: number }; end: { row: number; col: number } } | null {
+    if (!this.selectionAnchor || !this.selectionFocus) {
+      return null;
+    }
+    const a = this.selectionAnchor;
+    const b = this.selectionFocus;
+    const anchorBeforeFocus = a.row < b.row || (a.row === b.row && a.col <= b.col);
+    const start = anchorBeforeFocus ? a : b;
+    const end = anchorBeforeFocus ? b : a;
+    if (start.row === end.row && start.col === end.col) {
+      return null;
+    }
+    return { start, end };
+  }
+
+  private hasSelection(): boolean {
+    return this.getSelectionRange() !== null;
+  }
+
+  private clearSelection(): void {
+    this.selectionAnchor = null;
+    this.selectionFocus = null;
+    this.draggingSelection = false;
+  }
+
+  private getSelectedText(): string {
+    const range = this.getSelectionRange();
+    if (!range) {
+      return "";
+    }
+    const blocks = this.buildTranscriptBlocks(process.stdout.columns || 120).map((line) => this.stripAnsi(line));
+    const parts: string[] = [];
+    for (let row = range.start.row; row <= range.end.row; row += 1) {
+      const text = blocks[row] ?? "";
+      const chars = Array.from(text);
+      const start = row === range.start.row ? range.start.col : 0;
+      const end = row === range.end.row ? range.end.col : chars.length;
+      parts.push(chars.slice(start, end).join(""));
+    }
+    return parts.join("\n");
+  }
+
+  private copySelectionToClipboard(): void {
+    const text = this.getSelectedText();
+    if (!text) {
+      return;
+    }
+
+    const commands: Array<{ cmd: string; args: string[] }> = process.platform === "darwin"
+      ? [{ cmd: "pbcopy", args: [] }]
+      : process.platform === "win32"
+        ? [{ cmd: "clip", args: [] }]
+        : [
+          { cmd: "wl-copy", args: [] },
+          { cmd: "xclip", args: ["-selection", "clipboard"] },
+          { cmd: "xsel", args: ["--clipboard", "--input"] },
+        ];
+
+    for (const command of commands) {
+      const result = spawnSync(command.cmd, command.args, {
+        input: text,
+        encoding: "utf8",
+      });
+      if (result.status === 0) {
+        this.pushHistory({
+          kind: "message",
+          role: "system",
+          content: "已复制当前选区。",
+        });
+        return;
+      }
+    }
+
+    this.pushHistory({
+      kind: "message",
+      role: "system",
+      content: "复制失败：当前环境没有可用的剪贴板命令。",
+    });
   }
 
   private truncateAnsiAware(text: string, width: number): string {
@@ -1834,7 +2076,7 @@ class TypeScriptTui {
   }
 
   private enterAltScreen(): void {
-    process.stdout.write("\x1b[?1049h\x1b[?25l");
+    process.stdout.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h");
   }
 
   private scrollTranscript(delta: number): void {
@@ -1871,7 +2113,7 @@ class TypeScriptTui {
   }
 
   private shutdown(): void {
-    process.stdout.write("\x1b[?25h\x1b[?1049l");
+    process.stdout.write("\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?25h\x1b[?1049l");
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(false);
     }
