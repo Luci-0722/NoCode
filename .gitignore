@@ -7,3 +7,6 @@ data/
 claw-code/
 multiagent_system/.state/
 nocode_agent/.state/
+node_modules/
+*.zip
+claude-code-analysis/
