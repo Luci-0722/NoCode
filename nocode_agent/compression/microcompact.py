@@ -14,7 +14,7 @@ from typing import Any
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import before_model
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, RemoveMessage, SystemMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
