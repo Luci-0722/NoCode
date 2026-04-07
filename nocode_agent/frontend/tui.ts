@@ -95,6 +95,7 @@ const COLOR = {
     headingBold: "\x1b[38;2;95;215;175m\x1b[1m",
     code: "\x1b[38;2;255;180;108m",
     codeBg: "\x1b[48;2;40;44;52m",
+    strong: "\x1b[48;2;244;248;255m\x1b[38;2;49;110;201m",
     link: "\x1b[38;2;104;179;215m\x1b[4m",
     blockquote: "\x1b[38;2;139;153;166m",
     hr: "\x1b[38;2;80;80;80m",
@@ -128,6 +129,7 @@ class TypeScriptTui {
   private nextToolId = 1;
   private selectedToolId: number | null = null;
   private mouseCaptureEnabled = true;
+  private followLatestTool = true;
 
   // ── Resume / session picker state ──────────────────────────
   private readonly resumeMode: boolean;
@@ -423,6 +425,7 @@ class TypeScriptTui {
         this.streaming = "";
         this.pendingPrompts.length = 0;
         this.selectedToolId = null;
+        this.followLatestTool = true;
         this.scrollOffset = 0;
         break;
       case "text":
@@ -619,7 +622,9 @@ class TypeScriptTui {
     };
     this.history.push(run);
     this.trimHistory();
-    this.selectedToolId = run.id;
+    if (this.followLatestTool || this.selectedToolId === null) {
+      this.selectedToolId = run.id;
+    }
   }
 
   private finishToolRun(name: string, output?: string, toolCallId?: string): void {
@@ -633,7 +638,9 @@ class TypeScriptTui {
     }
     run.status = "done";
     run.output = output || "";
-    this.selectedToolId = run.id;
+    if (this.followLatestTool || this.selectedToolId === run.id || this.selectedToolId === null) {
+      this.selectedToolId = run.id;
+    }
   }
 
   private trimHistory(): void {
@@ -661,6 +668,7 @@ class TypeScriptTui {
       ? (delta > 0 ? 0 : tools.length - 1)
       : Math.max(0, Math.min(tools.length - 1, currentIndex + delta));
     this.selectedToolId = tools[nextIndex]?.id ?? null;
+    this.followLatestTool = nextIndex === tools.length - 1;
     this.ensureSelectedToolVisible();
     this.render();
   }
@@ -1432,9 +1440,9 @@ class TypeScriptTui {
     result = result
       .replace(/\x00CODE_START\x00/g, `${COLOR.md.codeBg}${COLOR.md.code}`)
       .replace(/\x00CODE_END\x00/g, COLOR.reset)
-      .replace(/\x00BI_START\x00/g, `${COLOR.bold}${COLOR.italic}`)
+      .replace(/\x00BI_START\x00/g, `${COLOR.md.strong}${COLOR.italic}`)
       .replace(/\x00BI_END\x00/g, COLOR.reset)
-      .replace(/\x00B_START\x00/g, COLOR.bold)
+      .replace(/\x00B_START\x00/g, COLOR.md.strong)
       .replace(/\x00B_END\x00/g, COLOR.reset)
       .replace(/\x00I_START\x00/g, COLOR.italic)
       .replace(/\x00I_END\x00/g, COLOR.reset)
