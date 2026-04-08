@@ -2,7 +2,9 @@
 # NoCode Agent - TUI launcher
 # Usage: nocode [--resume]
 
-PROJECT_DIR="/Users/lucheng/Projects/NoCode"
+# 自动定位项目目录（支持软链接）
+SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_PATH/.." && pwd)"
 TUI_PATH="$PROJECT_DIR/nocode_agent/frontend/tui.ts"
 
 export ZHIPU_API_KEY="${ZHIPU_API_KEY:-$(cat ~/.config/nocode/api_key 2>/dev/null || echo '')}"
