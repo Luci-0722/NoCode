@@ -2,7 +2,7 @@
 set -e
 
 # NoCode Agent - 一键启动脚本
-# Usage: ./start.sh [--resume]
+# Usage: ./start.sh [--resume] [--install]
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -11,11 +11,56 @@ cd "$SCRIPT_DIR"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+
+# ── 安装到 PATH ──
+install_to_path() {
+    local NOCODE_BIN="$SCRIPT_DIR/bin"
+
+    # 检测当前 shell 配置文件
+    local SHELL_RC=""
+    if [ -n "$ZSH_VERSION" ]; then
+        SHELL_RC="$HOME/.zshrc"
+    elif [ -n "$BASH_VERSION" ]; then
+        SHELL_RC="$HOME/.bashrc"
+    fi
+
+    if [ -z "$SHELL_RC" ]; then
+        warn "无法检测 shell 类型，请手动添加以下内容到你的 shell 配置文件："
+        echo -e "  ${CYAN}export PATH=\"$NOCODE_BIN:\$PATH\"${NC}"
+        return
+    fi
+
+    # 检查是否已配置
+    if grep -q "$NOCODE_BIN" "$SHELL_RC" 2>/dev/null; then
+        info "PATH 已配置（$SHELL_RC），无需重复添加"
+    else
+        echo "" >> "$SHELL_RC"
+        echo "# NoCode Agent" >> "$SHELL_RC"
+        echo "export PATH=\"$NOCODE_BIN:\$PATH\"" >> "$SHELL_RC"
+        info "已将 $NOCODE_BIN 添加到 $SHELL_RC"
+    fi
+
+    # 当前会话也生效
+    export PATH="$NOCODE_BIN:$PATH"
+    info "现在可以直接在命令行运行 ${CYAN}nocode${NC} 启动了！"
+    info "（新终端窗口自动生效）"
+}
+
+# ── 检查 --install 参数 ──
+for arg in "$@"; do
+    case "$arg" in
+        --install)
+            install_to_path
+            exit 0
+            ;;
+    esac
+done
 
 # ── 1. 检查 Python ──
 if ! command -v python3 &>/dev/null; then
@@ -67,6 +112,14 @@ if [ ! -f "nocode_agent/config.yaml" ]; then
     fi
 fi
 
-# ── 5. 启动 ──
+# ── 5. 提示安装到 PATH ──
+if ! command -v nocode &>/dev/null; then
+    echo ""
+    warn "nocode 命令未加入 PATH"
+    info "运行 ${CYAN}./start.sh --install${NC} 可添加到环境变量，之后直接 nocode 启动"
+    echo ""
+fi
+
+# ── 6. 启动 ──
 info "启动 NoCode Agent..."
 exec bin/nocode "$@"
