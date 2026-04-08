@@ -37,7 +37,7 @@ from acp.schema import (
 )
 
 from nocode_agent.agent import MainAgent, create_mainagent
-from nocode_agent.config import load_config, resolve_api_key
+from nocode_agent.config import load_config, resolve_api_key, resolve_proxy
 from nocode_agent.log import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -198,6 +198,7 @@ class ACPAgentPool:
             thread_id=thread_id,
             persistence_config=self._config,
             mcp_servers=session_data.get("mcp_servers"),
+            proxy=resolve_proxy(self._config),
         )
         with self._lock:
             cached = self._agents.get(session_id)

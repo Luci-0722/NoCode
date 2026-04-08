@@ -1,14 +1,20 @@
-## GLM 默认配置
-# model: glm-5.1
-# base_url: "https://open.bigmodel.cn/api/coding/paas/v4"
+# GLM 默认配置
+model: glm-5.1
+base_url: "https://open.bigmodel.cn/api/coding/paas/v4"
 
 ## Ollama 本地配置
-model: qwen2.5-coder:32b
-base_url: "http://127.0.0.1:11434/v1"
+# model: qwen2.5-coder:14b
+# base_url: "http://127.0.0.1:11434/v1"
+
+# HTTP/HTTPS 代理，留空或不设置则不使用代理
+# 支持 http:// 和 socks5:// 协议
+# proxy: "http://127.0.0.1:7890"
+# proxy: "socks5://127.0.0.1:1080"
+
 max_tokens: 4096
 temperature: 0.7
-# subagent_model: glm-5.1
-subagent_model: qwen2.5-coder:32b
+subagent_model: glm-5.1
+# subagent_model: qwen2.5-coder:14b
 subagent_temperature: 0.7
 
 checkpoint_db_path: "nocode_agent/.state/langgraph-checkpoints.sqlite"

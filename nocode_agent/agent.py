@@ -413,8 +413,9 @@ def _build_model(
     base_url: str,
     temperature: float,
     max_tokens: int,
+    proxy: str = "",
 ) -> ChatOpenAI:
-    return ChatOpenAI(
+    kwargs: dict[str, Any] = dict(
         model=model,
         api_key=api_key,
         base_url=base_url,
@@ -422,6 +423,9 @@ def _build_model(
         max_tokens=max_tokens,
         max_retries=6,
     )
+    if proxy:
+        kwargs["openai_proxy"] = proxy
+    return ChatOpenAI(**kwargs)
 
 
 def _mcp_env_to_dict(items: list[Any] | None) -> dict[str, str]:
@@ -516,11 +520,12 @@ async def create_mainagent(
     thread_id: str | None = None,
     persistence_config: dict | None = None,
     mcp_servers: list[Any] | None = None,
+    proxy: str = "",
 ) -> MainAgent:
     """创建主代理和代码子代理。"""
     logger.info(
-        "Creating MainAgent: model=%s, base_url=%s, max_tokens=%d, temperature=%.2f",
-        model, base_url, max_tokens, temperature,
+        "Creating MainAgent: model=%s, base_url=%s, max_tokens=%d, temperature=%.2f, proxy=%s",
+        model, base_url, max_tokens, temperature, proxy or "(none)",
     )
     context_window = _resolve_context_window(model)
     checkpointer = CheckpointerManager(resolve_checkpoint_path(persistence_config))
@@ -532,6 +537,7 @@ async def create_mainagent(
         base_url=base_url,
         temperature=temperature,
         max_tokens=max_tokens,
+        proxy=proxy,
     )
     subagent_llm = _build_model(
         api_key=api_key,
@@ -539,6 +545,7 @@ async def create_mainagent(
         base_url=base_url,
         temperature=subagent_temperature,
         max_tokens=max_tokens,
+        proxy=proxy,
     )
 
     # ── Session Memory (Layer 2) ──────────────────────────────
@@ -552,6 +559,7 @@ async def create_mainagent(
             base_url=base_url,
             temperature=0.1,
             max_tokens=4096,
+            proxy=proxy,
         )
         sm_extractor = SessionMemoryExtractor(
             config=sm_config,
@@ -570,6 +578,7 @@ async def create_mainagent(
             base_url=base_url,
             temperature=0.1,
             max_tokens=ac_config.max_summary_tokens,
+            proxy=proxy,
         )
         auto_compactor = AutoCompactor(
             config=ac_config,

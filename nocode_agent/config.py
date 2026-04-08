@@ -59,3 +59,21 @@ def resolve_api_key(config: dict[str, Any]) -> str:
         return "ollama"
 
     return ""
+
+
+def resolve_proxy(config: dict[str, Any]) -> str:
+    """统一解析 HTTP 代理地址。
+
+    优先级: 环境变量 NOCODE_PROXY > 配置文件 proxy 字段 > 环境变量 OPENAI_PROXY
+    返回空字符串表示不使用代理。
+    """
+    for env_name in ("NOCODE_PROXY", "OPENAI_PROXY"):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+
+    config_value = str(config.get("proxy", "") or "").strip()
+    if config_value:
+        return config_value
+
+    return ""
