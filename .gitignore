@@ -10,3 +10,5 @@ nocode_agent/.state/
 node_modules/
 *.zip
 claude-code-analysis/
+# 包含敏感信息（API key 等），不提交
+nocode_agent/config.yaml
