@@ -10,7 +10,7 @@ import sys
 from typing import Any
 
 from nocode_agent.agent import create_mainagent
-from nocode_agent.config import load_config
+from nocode_agent.config import load_config, resolve_api_key
 from nocode_agent.log import setup_logging
 from nocode_agent.persistence import list_threads, load_thread_messages, resolve_checkpoint_path
 
@@ -22,9 +22,9 @@ def _load_config() -> dict[str, Any]:
 
 
 async def _build_agent(config: dict[str, Any]):
-    api_key = os.environ.get("ZHIPU_API_KEY", config.get("api_key", ""))
+    api_key = resolve_api_key(config)
     if not api_key:
-        raise RuntimeError("missing API key: set ZHIPU_API_KEY first")
+        raise RuntimeError("missing API key: set NOCODE_API_KEY/OPENAI_API_KEY/OLLAMA_API_KEY/ZHIPU_API_KEY, or configure api_key")
 
     return await create_mainagent(
         api_key=api_key,

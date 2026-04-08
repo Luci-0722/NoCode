@@ -37,7 +37,7 @@ from acp.schema import (
 )
 
 from nocode_agent.agent import MainAgent, create_mainagent
-from nocode_agent.config import load_config
+from nocode_agent.config import load_config, resolve_api_key
 from nocode_agent.log import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -173,9 +173,9 @@ class ACPAgentPool:
         self._agents: dict[str, MainAgent] = {}
         self._lock = Lock()
 
-        api_key = os.environ.get("ZHIPU_API_KEY", config.get("api_key", ""))
+        api_key = resolve_api_key(config)
         if not api_key:
-            raise RuntimeError("missing API key: set ZHIPU_API_KEY first")
+            raise RuntimeError("missing API key: set NOCODE_API_KEY/OPENAI_API_KEY/OLLAMA_API_KEY/ZHIPU_API_KEY, or configure api_key")
         self._api_key = api_key
 
     async def get(self, session_id: str) -> MainAgent:

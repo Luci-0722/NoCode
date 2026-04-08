@@ -6,12 +6,12 @@ PROJECT_DIR="/Users/lucheng/Projects/NoCode"
 TUI_PATH="$PROJECT_DIR/nocode_agent/frontend/tui.ts"
 
 export ZHIPU_API_KEY="${ZHIPU_API_KEY:-$(cat ~/.config/nocode/api_key 2>/dev/null || echo '')}"
+export NOCODE_API_KEY="${NOCODE_API_KEY:-${OLLAMA_API_KEY:-${OPENAI_API_KEY:-${ZHIPU_API_KEY}}}}"
 
-if [ -z "$ZHIPU_API_KEY" ]; then
-    echo "Error: ZHIPU_API_KEY is not set."
-    echo "  export ZHIPU_API_KEY=your-key"
-    echo "  Or save to ~/.config/nocode/api_key"
-    exit 1
+if [ -z "$NOCODE_API_KEY" ] && [ -z "${NOCODE_AGENT_CONFIG:-}" ]; then
+    echo "Warning: no API key detected."
+    echo "  If you use Ollama, set NOCODE_AGENT_CONFIG to an Ollama config file"
+    echo "  Or export one of: NOCODE_API_KEY / OPENAI_API_KEY / OLLAMA_API_KEY / ZHIPU_API_KEY"
 fi
 
 cd "$PROJECT_DIR"
