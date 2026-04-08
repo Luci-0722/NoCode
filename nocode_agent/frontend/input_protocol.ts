@@ -23,6 +23,13 @@ const KEYPRESS_PASSTHROUGH_SEQUENCES = new Set([
   "\x1bOF",
 ]);
 
+// macOS 输入法切换键（Kitty keyboard protocol: \x1b[57358u）
+const INPUT_METHOD_SWITCH_SEQUENCES = new Set([
+  "\x1b[57358u",
+  "\x1b[57358;",
+  "\x1b[57358",
+]);
+
 const EXACT_CONTROL_SEQUENCES = [
   ...CTRL_J_SEQUENCES,
   ...CTRL_K_SEQUENCES,
@@ -31,6 +38,7 @@ const EXACT_CONTROL_SEQUENCES = [
   ...ESCAPE_SEQUENCES,
   ...SHIFT_ENTER_SEQUENCES,
   ...KEYPRESS_PASSTHROUGH_SEQUENCES,
+  ...INPUT_METHOD_SWITCH_SEQUENCES,
 ].sort((left, right) => right.length - left.length);
 
 export type RawInputToken =
@@ -63,6 +71,10 @@ export function isShiftEnterSequence(chunk: string): boolean {
 
 export function isKeypressPassthroughSequence(chunk: string): boolean {
   return KEYPRESS_PASSTHROUGH_SEQUENCES.has(chunk);
+}
+
+export function isInputMethodSwitchSequence(chunk: string): boolean {
+  return INPUT_METHOD_SWITCH_SEQUENCES.has(chunk);
 }
 
 export function looksLikeMouseSequence(chunk: string): boolean {

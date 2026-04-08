@@ -13,6 +13,7 @@ import {
   isCtrlKSequence,
   isCtrlOSequence,
   isEscapeSequence,
+  isInputMethodSwitchSequence,
   isKeypressPassthroughSequence,
   isShiftEnterSequence,
   looksLikeMouseSequence,
@@ -567,6 +568,10 @@ class TypeScriptTui {
       if (!this.showSessionPicker && !this.questionMode) {
         this.insertNewline();
       }
+      return;
+    }
+    // 忽略输入法切换键（macOS 中英文切换）
+    if (isInputMethodSwitchSequence(chunk)) {
       return;
     }
     this.flushKeyboardInput(chunk);
