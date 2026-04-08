@@ -15,6 +15,7 @@ from urllib.parse import quote, urljoin
 from urllib.request import Request, urlopen
 from pathlib import Path
 from uuid import uuid4
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from enum import Flag, auto
@@ -712,15 +713,7 @@ class AskUserQuestionInput(BaseModel):
     )
 
 
-@tool("ask_user_question", args_schema=AskUserQuestionInput)
-def ask_user_question(questions: list[dict]) -> str:
-    """向用户提出结构化问题以澄清需求或选择方案。
-
-    只在需要用户输入来消除歧义时使用。不要用于：
-    - 确认计划或请求许可（直接执行即可）
-    - 询问"这个方案可以吗？"（直接开始做）
-    - 收集本可以从代码中推断的信息（先搜索代码）
-    """
+def _validate_ask_user_questions(questions: list[dict]) -> list[dict] | str:
     if not questions:
         return "错误：问题列表不能为空。"
 
@@ -746,8 +739,31 @@ def ask_user_question(questions: list[dict]) -> str:
         if isinstance(q.get("multiSelect"), bool):
             entry["multiSelect"] = q["multiSelect"]
         validated.append(entry)
+    return validated
 
-    return json.dumps({"type": "ask_user_question", "questions": validated}, ensure_ascii=False)
+
+def make_ask_user_question_tool(
+    wait_for_answer: Callable[[list[dict[str, Any]]], Awaitable[str]],
+):
+    @tool("ask_user_question", args_schema=AskUserQuestionInput)
+    async def ask_user_question(questions: list[dict]) -> str:
+        """向用户提出结构化问题以澄清需求或选择方案。
+
+        只在需要用户输入来消除歧义时使用。不要用于：
+        - 确认计划或请求许可（直接执行即可）
+        - 询问"这个方案可以吗？"（直接开始做）
+        - 收集本可以从代码中推断的信息（先搜索代码）
+        """
+        validated = _validate_ask_user_questions(questions)
+        if isinstance(validated, str):
+            return validated
+        try:
+            answer = await wait_for_answer(validated)
+        except RuntimeError as error:
+            return f"错误：{error}"
+        return answer.strip() or "(跳过了所有问题)"
+
+    return ask_user_question
 
 
 class TodoInput(BaseModel):
@@ -772,8 +788,11 @@ def todo_read() -> str:
     return "\n".join(f"- {item}" for item in _TODO_STORE)
 
 
-def build_core_tools() -> list:
+def build_core_tools(
+    wait_for_answer: Callable[[list[dict[str, Any]]], Awaitable[str]],
+) -> list:
     """返回全部 12 个核心工具（含 ask_user_question）。"""
+    ask_user_question = make_ask_user_question_tool(wait_for_answer)
     return [
         read_file,
         write_file,
@@ -790,9 +809,11 @@ def build_core_tools() -> list:
     ]
 
 
-def build_readonly_tools() -> list:
+def build_readonly_tools(
+    wait_for_answer: Callable[[list[dict[str, Any]]], Awaitable[str]],
+) -> list:
     """返回只读工具集（排除 write/edit/delegate_code），供 Explore/Plan/verification 子代理使用。"""
-    all_tools = build_core_tools()
+    all_tools = build_core_tools(wait_for_answer)
     blocked = {"write", "edit"}
     return [t for t in all_tools if t.name not in blocked]
 

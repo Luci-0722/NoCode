@@ -51,7 +51,11 @@ _stream_task: asyncio.Task | None = None
 async def _stream_prompt(agent, prompt: str) -> None:
     try:
         async for event_type, *data in agent.chat(prompt):
-            if event_type == "text":
+            if event_type == "runtime_event":
+                payload = data[0] if data else {}
+                if isinstance(payload, dict):
+                    _emit(payload)
+            elif event_type == "text":
                 _emit({"type": "text", "delta": data[0]})
             elif event_type == "retry":
                 _emit(
@@ -207,8 +211,21 @@ async def main() -> int:
                 _emit({"type": "error", "message": "empty prompt"})
                 continue
             if _stream_task and not _stream_task.done():
-                _stream_task.cancel()
-            _stream_task = asyncio.create_task(_stream_prompt(agent, prompt))
+                await agent.enqueue_user_input(prompt)
+                _emit({"type": "prompt_queued", "text": prompt})
+            else:
+                _stream_task = asyncio.create_task(_stream_prompt(agent, prompt))
+            continue
+
+        if message_type == "question_answer":
+            answer = str(payload.get("text", "")).strip()
+            if not answer:
+                _emit({"type": "error", "message": "empty question answer"})
+                continue
+            try:
+                await agent.submit_question_answer(answer)
+            except RuntimeError as error:
+                _emit({"type": "error", "message": str(error)})
             continue
 
         # ── Cancel: interrupt current stream ──────────────────────

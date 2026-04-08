@@ -24,6 +24,7 @@ from nocode_agent.compression import (
     build_auto_compact_config,
     build_session_memory_config,
 )
+from nocode_agent.interactive import InteractiveSessionBroker, PendingUserInputMiddleware
 from nocode_agent.persistence import CheckpointerManager, resolve_checkpoint_path
 from nocode_agent.prompts import (
     build_main_system_prompt,
@@ -126,12 +127,14 @@ class MainAgent:
         self,
         agent,
         checkpointer: CheckpointerManager,
+        interactive_broker: InteractiveSessionBroker,
         thread_id: str | None = None,
         model_name: str = "",
         subagent_model_name: str = "",
     ):
         self._agent = agent
         self._checkpointer = checkpointer
+        self._interactive_broker = interactive_broker
         self._thread_id = thread_id or self._new_thread_id()
         self._model_name = model_name
         self._subagent_model_name = subagent_model_name
@@ -154,6 +157,15 @@ class MainAgent:
 
     async def clear(self):
         await self._checkpointer.delete_thread(self._thread_id)
+
+    async def enqueue_user_input(self, text: str) -> None:
+        await self._interactive_broker.enqueue_user_input(text)
+
+    async def submit_question_answer(self, answer: str) -> None:
+        await self._interactive_broker.submit_question_answer(answer)
+
+    async def drain_runtime_events(self) -> list[dict[str, Any]]:
+        return await self._interactive_broker.drain_events()
 
     async def chat(self, user_input: str):
         """异步生成器，yield (event_type, *data)。包含自动重试。"""
@@ -212,6 +224,9 @@ class MainAgent:
                             continue
                         if isinstance(token, AIMessageChunk) and token.text:
                             yield ("text", token.text)
+                        runtime_events = await self._interactive_broker.drain_events()
+                        for event in runtime_events:
+                            yield ("runtime_event", event)
                         continue
 
                     if chunk_type != "updates":
@@ -301,8 +316,14 @@ class MainAgent:
                                         _render_tool_output(message.content),
                                         tool_call_id,
                                     )
+                        runtime_events = await self._interactive_broker.drain_events()
+                        for event in runtime_events:
+                            yield ("runtime_event", event)
 
                 # 流正常结束，退出重试循环
+                runtime_events = await self._interactive_broker.drain_events()
+                for event in runtime_events:
+                    yield ("runtime_event", event)
                 return
             except Exception as exc:
                 is_retryable = _is_retryable_error(exc)
@@ -564,9 +585,11 @@ async def create_mainagent(
         auto_compactor=auto_compactor,
         sm_extractor=sm_extractor,
     )
+    interactive_broker = InteractiveSessionBroker()
+    main_middleware = [*middleware, PendingUserInputMiddleware(interactive_broker)]
 
-    core_tools = build_core_tools()
-    readonly_tools = build_readonly_tools()
+    core_tools = build_core_tools(interactive_broker.ask_user_question)
+    readonly_tools = build_readonly_tools(interactive_broker.ask_user_question)
 
     # Initialize skill system — discover skills from all sources
     init_skill_registry(Path.cwd())
@@ -624,7 +647,7 @@ async def create_mainagent(
         tools=tools,
         system_prompt=build_main_system_prompt(),
         checkpointer=saver,
-        middleware=middleware,
+        middleware=main_middleware,
         name="mainagent_supervisor",
     )
 
@@ -633,6 +656,7 @@ async def create_mainagent(
     return MainAgent(
         agent=agent,
         checkpointer=checkpointer,
+        interactive_broker=interactive_broker,
         thread_id=resolved_thread_id,
         model_name=model,
         subagent_model_name=subagent_model or model,

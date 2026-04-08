@@ -149,6 +149,8 @@ type BackendEvent =
   | { type: "error"; message: string }
   | { type: "fatal"; message: string }
   | { type: "cancelled" }
+  | { type: "prompt_queued"; text: string }
+  | { type: "queued_prompt_injected"; texts: string[] }
   | { type: "thread_list"; threads: ThreadInfo[] }
   | { type: "resumed"; thread_id: string; model: string; subagent_model: string; cwd: string }
   | {
@@ -931,6 +933,22 @@ class TypeScriptTui {
         this.pushHistory({ kind: "message", role: "system", content: "⏹ 已中断生成" });
         this.pendingPrompts.length = 0;
         break;
+      case "prompt_queued":
+        break;
+      case "queued_prompt_injected":
+        for (const text of event.texts) {
+          const queued = this.history.find(
+            (entry) =>
+              entry.kind === "message"
+              && entry.role === "user"
+              && entry.state === "queued"
+              && entry.content === text,
+          );
+          if (queued?.kind === "message") {
+            queued.state = "sent";
+          }
+        }
+        break;
       case "thread_list":
         this.sessionThreads = event.threads;
         this.refreshSessionPickerThreads();
@@ -994,7 +1012,7 @@ class TypeScriptTui {
       state: this.generating ? "queued" : "sent",
     });
     if (this.generating) {
-      this.pendingPrompts.push({ messageId, text });
+      this.sendBackend({ type: "prompt", text });
     } else {
       this.dispatchPrompt(text, messageId);
     }
@@ -1581,24 +1599,19 @@ class TypeScriptTui {
       return;
     }
 
-    // All questions answered — format as user message and send as prompt
+    // 全部回答完成后，作为 ask_user_question 的工具结果恢复当前回合
     const answerText = this.formatQuestionAnswer();
     this.questionMode = false;
     this.activeQuestions = [];
     this.questionAnswers = [];
 
-    // Push to history and dispatch as a normal prompt
-    const messageId = this.pushHistory({
+    this.pushHistory({
       kind: "message",
       role: "user",
       content: answerText,
-      state: this.generating ? "queued" : "sent",
+      state: "sent",
     });
-    if (this.generating) {
-      this.pendingPrompts.push({ messageId, text: answerText });
-    } else {
-      this.dispatchPrompt(answerText, messageId);
-    }
+    this.sendBackend({ type: "question_answer", text: answerText });
     this.render();
   }
 
