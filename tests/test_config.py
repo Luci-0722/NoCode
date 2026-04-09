@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from nocode_agent.agent import _build_no_proxy_mounts
-from nocode_agent.config import resolve_no_proxy, resolve_proxy, resolve_request_timeout
+from nocode_agent.config import (
+    resolve_api_key,
+    resolve_no_proxy,
+    resolve_proxy,
+    resolve_request_timeout,
+)
 
 
 def test_resolve_proxy_supports_proxy_object() -> None:
@@ -60,3 +65,10 @@ def test_resolve_request_timeout_supports_positive_number() -> None:
 
 def test_resolve_request_timeout_falls_back_for_invalid_value() -> None:
     assert resolve_request_timeout({"request_timeout": "invalid"}, default=90.0) == 90.0
+
+
+def test_resolve_api_key_supports_dashscope_env(monkeypatch) -> None:
+    monkeypatch.delenv("NOCODE_API_KEY", raising=False)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-secret")
+
+    assert resolve_api_key({}) == "dashscope-secret"

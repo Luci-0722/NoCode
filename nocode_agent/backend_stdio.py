@@ -30,7 +30,10 @@ def _load_config() -> dict[str, Any]:
 async def _build_agent(config: dict[str, Any]):
     api_key = resolve_api_key(config)
     if not api_key:
-        raise RuntimeError("missing API key: set NOCODE_API_KEY/OPENAI_API_KEY/OLLAMA_API_KEY/ZHIPU_API_KEY, or configure api_key")
+        raise RuntimeError(
+            "missing API key: set NOCODE_API_KEY/DASHSCOPE_API_KEY/BAILIAN_API_KEY/"
+            "OPENAI_API_KEY/OLLAMA_API_KEY/ZHIPU_API_KEY, or configure api_key"
+        )
 
     return await create_mainagent(
         api_key=api_key,

@@ -76,7 +76,14 @@ def resolve_api_key(config: dict[str, Any]) -> str:
     优先读取更通用的环境变量；如果目标是本地模型服务且未提供 key，
     则返回占位值，满足 OpenAI 兼容客户端的参数要求。
     """
-    for env_name in ("NOCODE_API_KEY", "OLLAMA_API_KEY", "OPENAI_API_KEY", "ZHIPU_API_KEY"):
+    for env_name in (
+        "NOCODE_API_KEY",
+        "DASHSCOPE_API_KEY",
+        "BAILIAN_API_KEY",
+        "OLLAMA_API_KEY",
+        "OPENAI_API_KEY",
+        "ZHIPU_API_KEY",
+    ):
         value = os.environ.get(env_name, "").strip()
         if value:
             return value
