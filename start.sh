@@ -76,11 +76,17 @@ fi
 
 # ── 2. 检查 Node.js ──
 if ! command -v node &>/dev/null; then
-    error "未找到 node，请先安装 Node.js >= 20"
+    error "未找到 node，请先安装 Node.js"
 fi
 info "Node $(node -v) ✓"
 
-# ── 3. 创建虚拟环境并安装依赖 ──
+# ── 3. 安装 Node.js 依赖 ──
+if [ ! -x "node_modules/.bin/tsx" ]; then
+    info "安装 Node.js 依赖..."
+    npm install
+fi
+
+# ── 4. 创建虚拟环境并安装依赖 ──
 if [ ! -d ".venv" ]; then
     info "创建虚拟环境..."
     python3 -m venv .venv
@@ -94,7 +100,7 @@ if ! python3 -c "import nocode_agent" 2>/dev/null || [ "pyproject.toml" -nt ".ve
     pip install -e . -q
 fi
 
-# ── 4. 配置文件检查 ──
+# ── 5. 配置文件检查 ──
 if [ ! -f "nocode_agent/config.yaml" ]; then
     if [ -f "nocode_agent/config.example.yaml" ]; then
         warn "未找到 config.yaml，从模板创建..."
@@ -112,7 +118,7 @@ if [ ! -f "nocode_agent/config.yaml" ]; then
     fi
 fi
 
-# ── 5. 提示安装到 PATH ──
+# ── 6. 提示安装到 PATH ──
 if ! command -v nocode &>/dev/null; then
     echo ""
     warn "nocode 命令未加入 PATH"
@@ -120,6 +126,6 @@ if ! command -v nocode &>/dev/null; then
     echo ""
 fi
 
-# ── 6. 启动 ──
+# ── 7. 启动 ──
 info "启动 NoCode Agent..."
 exec bin/nocode "$@"

@@ -28,4 +28,17 @@ if not defined NOCODE_AGENT_CONFIG (
 
 :has_key
 cd /d "%PROJECT_DIR%"
-node --experimental-strip-types "%TUI_PATH%" %*
+if exist "%PROJECT_DIR%\node_modules\.bin\tsx.cmd" (
+    call "%PROJECT_DIR%\node_modules\.bin\tsx.cmd" "%TUI_PATH%" %*
+    exit /b %errorlevel%
+)
+
+node --experimental-strip-types -e "console.log('ok')" >nul 2>&1
+if not errorlevel 1 (
+    node --experimental-strip-types "%TUI_PATH%" %*
+    exit /b %errorlevel%
+)
+
+echo [ERROR] Current Node.js cannot run TypeScript directly.
+echo [ERROR] Run npm install in the project root, or upgrade Node.js.
+exit /b 1

@@ -63,13 +63,23 @@ if ($LASTEXITCODE -ne 0) {
 # 2. 检查 Node.js
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) {
-    Write-Host "[ERROR] node not found. Please install Node.js >= 20" -ForegroundColor Red
+    Write-Host "[ERROR] node not found. Please install Node.js." -ForegroundColor Red
     exit 1
 }
 $nodeVer = & node -v
 Write-Status "[OK]" "Node $nodeVer"
 
-# 3. 创建虚拟环境并安装依赖
+# 3. 安装前端依赖
+if (-not (Test-Path "node_modules\.bin\tsx.cmd")) {
+    Write-Status "[RUN]" "Installing Node.js dependencies..."
+    & npm install
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[ERROR] npm install failed." -ForegroundColor Red
+        exit 1
+    }
+}
+
+# 4. 创建虚拟环境并安装依赖
 if (-not (Test-Path ".venv")) {
     Write-Status "[RUN]" "Creating virtual environment..."
     & python -m venv .venv
@@ -83,7 +93,7 @@ if ($LASTEXITCODE -ne 0) {
     & pip install -e . -q
 }
 
-# 4. 检查配置文件
+# 5. 检查配置文件
 if (-not (Test-Path "nocode_agent\config.yaml")) {
     if (Test-Path "nocode_agent\config.example.yaml") {
         Write-Host "[WARN] config.yaml not found. Creating it from template..." -ForegroundColor Yellow
@@ -100,7 +110,7 @@ if (-not (Test-Path "nocode_agent\config.yaml")) {
     }
 }
 
-# 5. 提示安装到 PATH
+# 6. 提示安装到 PATH
 $nocodeCmd = Get-Command nocode -ErrorAction SilentlyContinue
 if (-not $nocodeCmd) {
     Write-Host ""
@@ -109,6 +119,6 @@ if (-not $nocodeCmd) {
     Write-Host ""
 }
 
-# 6. 启动
+# 7. 启动
 Write-Status ">" "Starting NoCode Agent..."
 & .\bin\nocode.ps1 @ExtraArgs

@@ -17,4 +17,15 @@ if [ -z "$NOCODE_API_KEY" ] && [ -z "${NOCODE_AGENT_CONFIG:-}" ]; then
 fi
 
 cd "$PROJECT_DIR"
-exec node --experimental-strip-types "$TUI_PATH" "$@"
+
+if [ -x "$PROJECT_DIR/node_modules/.bin/tsx" ]; then
+    exec "$PROJECT_DIR/node_modules/.bin/tsx" "$TUI_PATH" "$@"
+fi
+
+if node --experimental-strip-types -e "console.log('ok')" >/dev/null 2>&1; then
+    exec node --experimental-strip-types "$TUI_PATH" "$@"
+fi
+
+echo "Error: current Node.js cannot run TypeScript directly."
+echo "Run npm install in the project root, or upgrade Node.js."
+exit 1

@@ -33,4 +33,24 @@ if (-not $env:NOCODE_API_KEY -and -not $env:NOCODE_AGENT_CONFIG) {
 }
 
 Set-Location $ProjectDir
-& node --experimental-strip-types $TuiPath @Args
+$TsxPath = Join-Path $ProjectDir "node_modules\.bin\tsx.cmd"
+$CanStripTypes = $false
+
+try {
+    $null = & node --experimental-strip-types -e "console.log('ok')" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $CanStripTypes = $true
+    }
+} catch {
+    $CanStripTypes = $false
+}
+
+if (Test-Path $TsxPath) {
+    & $TsxPath $TuiPath @Args
+} elseif ($CanStripTypes) {
+    & node --experimental-strip-types $TuiPath @Args
+} else {
+    Write-Host "[ERROR] Current Node.js cannot run TypeScript directly." -ForegroundColor Red
+    Write-Host "[ERROR] Run npm install in the project root, or upgrade Node.js." -ForegroundColor Red
+    exit 1
+}

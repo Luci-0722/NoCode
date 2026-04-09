@@ -31,12 +31,22 @@ if errorlevel 1 (
 :: ── 2. 检查 Node.js ──
 where node >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] 未找到 node，请先安装 Node.js ^>= 20
+    echo [ERROR] 未找到 node，请先安装 Node.js
     exit /b 1
 )
 for /f "tokens=*" %%v in ('node -v') do echo [INFO] Node %%v OK
 
-:: ── 3. 创建虚拟环境并安装依赖 ──
+:: ── 3. 安装 Node.js 依赖 ──
+if not exist "node_modules\.bin\tsx.cmd" (
+    echo [INFO] 安装 Node.js 依赖...
+    call npm install
+    if errorlevel 1 (
+        echo [ERROR] npm install 失败
+        exit /b 1
+    )
+)
+
+:: ── 4. 创建虚拟环境并安装依赖 ──
 if not exist ".venv" (
     echo [INFO] 创建虚拟环境...
     python -m venv .venv
@@ -50,7 +60,7 @@ if errorlevel 1 (
     pip install -e . -q
 )
 
-:: ── 4. 配置文件检查 ──
+:: ── 5. 配置文件检查 ──
 if not exist "nocode_agent\config.yaml" (
     if exist "nocode_agent\config.example.yaml" (
         echo [WARN] 未找到 config.yaml，从模板创建...
@@ -67,7 +77,7 @@ if not exist "nocode_agent\config.yaml" (
     )
 )
 
-:: ── 5. 启动 ──
+:: ── 6. 启动 ──
 echo [INFO] 启动 NoCode Agent...
 call bin\nocode.bat %*
 exit /b %errorlevel%
