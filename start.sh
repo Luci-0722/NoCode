@@ -6,6 +6,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python"
+PYTHON_DEPS_STAMP="$SCRIPT_DIR/.venv/.nocode-python-deps.stamp"
 
 # 颜色
 RED='\033[0;31m'
@@ -95,9 +97,17 @@ fi
 source .venv/bin/activate
 
 # 检查是否需要安装/更新依赖
-if ! python3 -c "import nocode_agent, langchain" 2>/dev/null || [ "pyproject.toml" -nt ".venv/lib/python"* ]; then
+need_python_install=1
+if [ -f "$PYTHON_DEPS_STAMP" ] && [ "$PYTHON_DEPS_STAMP" -nt "pyproject.toml" ]; then
+    if "$VENV_PYTHON" -c "import nocode_agent, langchain" >/dev/null 2>&1; then
+        need_python_install=0
+    fi
+fi
+
+if [ "$need_python_install" -eq 1 ]; then
     info "安装 Python 依赖..."
-    python3 -m pip install -e .
+    "$VENV_PYTHON" -m pip install -e .
+    printf "ok\n" > "$PYTHON_DEPS_STAMP"
 fi
 
 # ── 5. 配置文件检查 ──

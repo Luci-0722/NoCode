@@ -52,16 +52,23 @@ if not exist ".venv" (
     python -m venv .venv
 )
 
-call .venv\Scripts\activate.bat
+set "VENV_PYTHON=%SCRIPT_DIR%\.venv\Scripts\python.exe"
+set "PYTHON_DEPS_STAMP=%SCRIPT_DIR%\.venv\.nocode-python-deps.stamp"
+set "NEED_PYTHON_INSTALL=1"
 
-python -c "import nocode_agent, langchain" >nul 2>&1
-if errorlevel 1 (
+if exist "%PYTHON_DEPS_STAMP%" (
+    "%VENV_PYTHON%" -c "import nocode_agent, langchain" >nul 2>&1
+    if not errorlevel 1 set "NEED_PYTHON_INSTALL=0"
+)
+
+if "%NEED_PYTHON_INSTALL%"=="1" (
     echo [INFO] 安装 Python 依赖...
-    python -m pip install -e .
+    "%VENV_PYTHON%" -m pip install -e .
     if errorlevel 1 (
         echo [ERROR] Python 依赖安装失败
         exit /b 1
     )
+    >"%PYTHON_DEPS_STAMP%" echo ok
 )
 
 :: ── 5. 配置文件检查 ──

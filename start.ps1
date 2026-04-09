@@ -10,6 +10,8 @@ param(
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
+$VenvPython = Join-Path $ScriptDir ".venv\Scripts\python.exe"
+$PythonDepsStamp = Join-Path $ScriptDir ".venv\.nocode-python-deps.stamp"
 
 function Write-Status {
     param(
@@ -85,21 +87,28 @@ if (-not (Test-Path ".venv")) {
     & python -m venv .venv
 }
 
-& .\.venv\Scripts\Activate.ps1
-
 $pythonDepsReady = $false
-& python -c "import nocode_agent, langchain" 2>$null
-if ($LASTEXITCODE -eq 0) {
+$needPythonInstall = $true
+
+if ((Test-Path $PythonDepsStamp) -and ((Get-Item $PythonDepsStamp).LastWriteTimeUtc -ge (Get-Item "pyproject.toml").LastWriteTimeUtc)) {
+    & $VenvPython -c "import nocode_agent, langchain" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $needPythonInstall = $false
+    }
+}
+
+if (-not $needPythonInstall) {
     $pythonDepsReady = $true
 }
 
 if (-not $pythonDepsReady) {
     Write-Status "[RUN]" "Installing Python dependencies..."
-    & python -m pip install -e .
+    & $VenvPython -m pip install -e .
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[ERROR] python dependency installation failed." -ForegroundColor Red
         exit 1
     }
+    Set-Content -Path $PythonDepsStamp -Value "ok"
 }
 
 # 5. 检查配置文件
