@@ -10,7 +10,7 @@ import sys
 from typing import Any
 
 from nocode_agent.agent import create_mainagent
-from nocode_agent.config import load_config, resolve_api_key, resolve_proxy
+from nocode_agent.config import load_config, resolve_api_key, resolve_no_proxy, resolve_proxy
 from nocode_agent.log import setup_logging
 from nocode_agent.persistence import list_threads, load_thread_messages, resolve_checkpoint_path
 
@@ -38,6 +38,7 @@ async def _build_agent(config: dict[str, Any]):
         thread_id=os.environ.get("NOCODE_THREAD_ID") or None,
         persistence_config=config,
         proxy=resolve_proxy(config),
+        no_proxy=resolve_no_proxy(config),
     )
 
 

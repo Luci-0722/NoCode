@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 from pathlib import Path
-from uuid import uuid4
 from typing import Any
+from uuid import uuid4
 
+import httpx
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langchain_openai import ChatOpenAI
@@ -414,6 +416,7 @@ def _build_model(
     temperature: float,
     max_tokens: int,
     proxy: str = "",
+    no_proxy: list[str] | None = None,
 ) -> ChatOpenAI:
     kwargs: dict[str, Any] = dict(
         model=model,
@@ -424,8 +427,57 @@ def _build_model(
         max_retries=6,
     )
     if proxy:
-        kwargs["openai_proxy"] = proxy
+        # 用显式 httpx client 支持 no_proxy，而不是仅传 openai_proxy。
+        kwargs["http_client"] = httpx.Client(
+            proxy=proxy,
+            mounts=_build_no_proxy_mounts(no_proxy),
+        )
+        kwargs["http_async_client"] = httpx.AsyncClient(
+            proxy=proxy,
+            mounts=_build_no_proxy_mounts(no_proxy),
+        )
     return ChatOpenAI(**kwargs)
+
+
+def _build_no_proxy_mounts(no_proxy: list[str] | None) -> dict[str, None] | None:
+    """把 no_proxy 配置转成 httpx mounts 规则。"""
+    mounts: dict[str, None] = {}
+    for raw_item in no_proxy or []:
+        item = str(raw_item).strip()
+        if not item:
+            continue
+        if item == "*":
+            # `all://` 直连表示完全禁用代理，优先级最高。
+            return {"all://": None}
+        if "://" in item:
+            mounts[item] = None
+            continue
+        if item.startswith("[") and item.endswith("]"):
+            mounts[f"all://{item}"] = None
+            continue
+        if "/" in item:
+            try:
+                ipaddress.ip_network(item, strict=False)
+            except ValueError:
+                mounts[f"all://*{item}"] = None
+            else:
+                mounts[f"all://{item}"] = None
+            continue
+        try:
+            ipaddress.ip_address(item)
+        except ValueError:
+            pass
+        else:
+            if ":" in item:
+                mounts[f"all://[{item}]"] = None
+            else:
+                mounts[f"all://{item}"] = None
+            continue
+        if item.lower() == "localhost":
+            mounts[f"all://{item}"] = None
+            continue
+        mounts[f"all://*{item}"] = None
+    return mounts or None
 
 
 def _mcp_env_to_dict(items: list[Any] | None) -> dict[str, str]:
@@ -521,11 +573,12 @@ async def create_mainagent(
     persistence_config: dict | None = None,
     mcp_servers: list[Any] | None = None,
     proxy: str = "",
+    no_proxy: list[str] | None = None,
 ) -> MainAgent:
     """创建主代理和代码子代理。"""
     logger.info(
-        "Creating MainAgent: model=%s, base_url=%s, max_tokens=%d, temperature=%.2f, proxy=%s",
-        model, base_url, max_tokens, temperature, proxy or "(none)",
+        "Creating MainAgent: model=%s, base_url=%s, max_tokens=%d, temperature=%.2f, proxy=%s, no_proxy=%s",
+        model, base_url, max_tokens, temperature, proxy or "(none)", ",".join(no_proxy or []) or "(none)",
     )
     context_window = _resolve_context_window(model)
     checkpointer = CheckpointerManager(resolve_checkpoint_path(persistence_config))
@@ -538,6 +591,7 @@ async def create_mainagent(
         temperature=temperature,
         max_tokens=max_tokens,
         proxy=proxy,
+        no_proxy=no_proxy,
     )
     subagent_llm = _build_model(
         api_key=api_key,
@@ -546,6 +600,7 @@ async def create_mainagent(
         temperature=subagent_temperature,
         max_tokens=max_tokens,
         proxy=proxy,
+        no_proxy=no_proxy,
     )
 
     # ── Session Memory (Layer 2) ──────────────────────────────
@@ -560,6 +615,7 @@ async def create_mainagent(
             temperature=0.1,
             max_tokens=4096,
             proxy=proxy,
+            no_proxy=no_proxy,
         )
         sm_extractor = SessionMemoryExtractor(
             config=sm_config,
@@ -579,6 +635,7 @@ async def create_mainagent(
             temperature=0.1,
             max_tokens=ac_config.max_summary_tokens,
             proxy=proxy,
+            no_proxy=no_proxy,
         )
         auto_compactor = AutoCompactor(
             config=ac_config,

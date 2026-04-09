@@ -14,6 +14,37 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("config.yaml")
 
 
+def _resolve_proxy_section(config: dict[str, Any]) -> tuple[str, Any]:
+    """提取代理主配置，兼容字符串和对象两种写法。"""
+    proxy_value = config.get("proxy", "")
+    if isinstance(proxy_value, dict):
+        proxy_url = str(
+            proxy_value.get("url")
+            or proxy_value.get("value")
+            or proxy_value.get("http")
+            or ""
+        ).strip()
+        return proxy_url, proxy_value
+    return str(proxy_value or "").strip(), {}
+
+
+def _split_no_proxy_value(raw_value: Any) -> list[str]:
+    """把 no_proxy 输入统一展开为字符串列表。"""
+    if raw_value is None:
+        return []
+
+    if isinstance(raw_value, str):
+        return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+    if isinstance(raw_value, (list, tuple, set)):
+        items: list[str] = []
+        for item in raw_value:
+            items.extend(_split_no_proxy_value(item))
+        return items
+
+    return [str(raw_value).strip()] if str(raw_value).strip() else []
+
+
 def load_config(config_path: str | None = None) -> dict[str, Any]:
     resolved = (
         config_path
@@ -72,8 +103,34 @@ def resolve_proxy(config: dict[str, Any]) -> str:
         if value:
             return value
 
-    config_value = str(config.get("proxy", "") or "").strip()
+    config_value, _ = _resolve_proxy_section(config)
     if config_value:
         return config_value
 
     return ""
+
+
+def resolve_no_proxy(config: dict[str, Any]) -> list[str]:
+    """统一解析不走代理的主机列表。
+
+    优先级: 环境变量 NOCODE_NO_PROXY > 配置文件 no_proxy / proxy.no_proxy > 环境变量 NO_PROXY
+    返回空列表表示没有显式绕过规则。
+    """
+    env_value = os.environ.get("NOCODE_NO_PROXY", "").strip()
+    if env_value:
+        return _split_no_proxy_value(env_value)
+
+    _, proxy_section = _resolve_proxy_section(config)
+    config_value = config.get("no_proxy")
+    if config_value is None and isinstance(proxy_section, dict):
+        config_value = proxy_section.get("no_proxy")
+
+    resolved = _split_no_proxy_value(config_value)
+    if resolved:
+        return resolved
+
+    fallback_value = os.environ.get("NO_PROXY", "").strip()
+    if fallback_value:
+        return _split_no_proxy_value(fallback_value)
+
+    return []

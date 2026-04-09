@@ -11,6 +11,19 @@ api_key: "YOUR_API_KEY_HERE"
 # 支持 http:// 和 socks5:// 协议
 # proxy: "http://127.0.0.1:7890"
 # proxy: "socks5://127.0.0.1:1080"
+#
+# 如需配置不走代理的域名/主机，可使用 no_proxy：
+# no_proxy:
+#   - localhost
+#   - 127.0.0.1
+#   - .internal.company.com
+#
+# 也支持对象写法：
+# proxy:
+#   url: "http://127.0.0.1:7890"
+#   no_proxy:
+#     - localhost
+#     - 127.0.0.1
 
 max_tokens: 4096
 temperature: 0.7
