@@ -95,9 +95,9 @@ fi
 source .venv/bin/activate
 
 # 检查是否需要安装/更新依赖
-if ! python3 -c "import nocode_agent" 2>/dev/null || [ "pyproject.toml" -nt ".venv/lib/python"* ]; then
+if ! python3 -c "import nocode_agent, langchain" 2>/dev/null || [ "pyproject.toml" -nt ".venv/lib/python"* ]; then
     info "安装 Python 依赖..."
-    pip install -e . -q
+    python3 -m pip install -e .
 fi
 
 # ── 5. 配置文件检查 ──

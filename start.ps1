@@ -87,10 +87,19 @@ if (-not (Test-Path ".venv")) {
 
 & .\.venv\Scripts\Activate.ps1
 
-$agentInstalled = & python -c "import nocode_agent" 2>$null
-if ($LASTEXITCODE -ne 0) {
+$pythonDepsReady = $false
+& python -c "import nocode_agent, langchain" 2>$null
+if ($LASTEXITCODE -eq 0) {
+    $pythonDepsReady = $true
+}
+
+if (-not $pythonDepsReady) {
     Write-Status "[RUN]" "Installing Python dependencies..."
-    & pip install -e . -q
+    & python -m pip install -e .
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[ERROR] python dependency installation failed." -ForegroundColor Red
+        exit 1
+    }
 }
 
 # 5. 检查配置文件

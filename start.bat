@@ -54,10 +54,14 @@ if not exist ".venv" (
 
 call .venv\Scripts\activate.bat
 
-python -c "import nocode_agent" >nul 2>&1
+python -c "import nocode_agent, langchain" >nul 2>&1
 if errorlevel 1 (
     echo [INFO] 安装 Python 依赖...
-    pip install -e . -q
+    python -m pip install -e .
+    if errorlevel 1 (
+        echo [ERROR] Python 依赖安装失败
+        exit /b 1
+    )
 )
 
 :: ── 5. 配置文件检查 ──
