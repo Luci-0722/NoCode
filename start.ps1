@@ -1,23 +1,36 @@
-# NoCode Agent - Windows 一键启动脚本 (PowerShell)
+﻿# NoCode Agent - Windows 一键启动脚本 (PowerShell)
 # Usage: .\start.ps1 [--resume] [-Install]
 
 param(
     [switch]$Install,
-    [Parameter(ValueFromRemainingArguments)]$ExtraArgs
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$ExtraArgs
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
 
-function Write-Status($icon, $msg) { Write-Host "$icon $msg" }
+function Write-Status {
+    param(
+        [string]$Icon,
+        [string]$Message
+    )
+
+    Write-Host ($Icon + " " + $Message)
+}
 
 # 安装到 PATH
 if ($Install) {
     $NocodeBin = Join-Path $ScriptDir "bin"
     $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 
-    if ($UserPath -split ";" | Where-Object { $_ -eq $NocodeBin }) {
+    $PathEntries = @()
+    if ($UserPath) {
+        $PathEntries = $UserPath -split ";"
+    }
+
+    if ($PathEntries -contains $NocodeBin) {
         Write-Status "[OK]" "PATH already contains $NocodeBin"
     } else {
         [Environment]::SetEnvironmentVariable("Path", "$UserPath;$NocodeBin", "User")
@@ -37,7 +50,8 @@ if (-not $python) {
     Write-Host "[ERROR] python not found. Please install Python >= 3.12" -ForegroundColor Red
     exit 1
 }
-$pyVer = & python --version 2>&1 | ForEach-Object { $_ -replace "Python ", "" }
+$pyVerOutput = & python --version 2>&1
+$pyVer = ($pyVerOutput | Select-Object -First 1).ToString() -replace "Python ", ""
 Write-Status "[OK]" "Python $pyVer"
 
 & python -c "import sys; exit(0 if sys.version_info >= (3, 12) else 1)"

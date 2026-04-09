@@ -1,4 +1,4 @@
-# NoCode Agent - Windows TUI launcher (PowerShell)
+﻿# NoCode Agent - Windows TUI launcher (PowerShell)
 # Usage: nocode [--resume]
 
 param([Parameter(ValueFromRemainingArguments)]$Args)
