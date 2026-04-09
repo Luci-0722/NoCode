@@ -28,7 +28,7 @@ if (-not $env:NOCODE_API_KEY) {
 
 if (-not $env:NOCODE_API_KEY -and -not $env:NOCODE_AGENT_CONFIG) {
     Write-Host "Warning: no API key detected."
-    Write-Host "  If you use Ollama, set NOCODE_AGENT_CONFIG to an Ollama config file"
+    Write-Host "  If you use Ollama, set NOCODE_AGENT_CONFIG to an Ollama config file."
     Write-Host "  Or set one of: NOCODE_API_KEY / OPENAI_API_KEY / OLLAMA_API_KEY / ZHIPU_API_KEY"
 }
 
