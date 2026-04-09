@@ -70,20 +70,46 @@ def _is_local_base_url(base_url: str) -> bool:
     return host in {"localhost", "127.0.0.1", "0.0.0.0"}
 
 
+def _provider_from_base_url(base_url: str) -> str:
+    """根据 base_url 推断当前模型供应商。"""
+    host = (urlparse(str(base_url or "").strip()).hostname or "").strip().lower()
+    if not host:
+        return ""
+    if "dashscope.aliyuncs.com" in host:
+        return "dashscope"
+    if "bigmodel.cn" in host:
+        return "zhipu"
+    if "openai.com" in host:
+        return "openai"
+    return ""
+
+
 def resolve_api_key(config: dict[str, Any]) -> str:
     """统一解析模型 API Key。
 
-    优先读取更通用的环境变量；如果目标是本地模型服务且未提供 key，
+    优先读取与当前供应商匹配的环境变量；如果目标是本地模型服务且未提供 key，
     则返回占位值，满足 OpenAI 兼容客户端的参数要求。
     """
-    for env_name in (
-        "NOCODE_API_KEY",
-        "DASHSCOPE_API_KEY",
-        "BAILIAN_API_KEY",
-        "OLLAMA_API_KEY",
-        "OPENAI_API_KEY",
-        "ZHIPU_API_KEY",
-    ):
+    provider = _provider_from_base_url(str(config.get("base_url", "") or ""))
+    env_candidates: list[str] = ["NOCODE_API_KEY"]
+    if provider == "dashscope":
+        env_candidates.extend(["DASHSCOPE_API_KEY", "BAILIAN_API_KEY"])
+    elif provider == "zhipu":
+        env_candidates.append("ZHIPU_API_KEY")
+    elif provider == "openai":
+        env_candidates.append("OPENAI_API_KEY")
+    else:
+        env_candidates.extend(
+            [
+                "DASHSCOPE_API_KEY",
+                "BAILIAN_API_KEY",
+                "OPENAI_API_KEY",
+                "ZHIPU_API_KEY",
+                "OLLAMA_API_KEY",
+            ]
+        )
+
+    for env_name in env_candidates:
         value = os.environ.get(env_name, "").strip()
         if value:
             return value

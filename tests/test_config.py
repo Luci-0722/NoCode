@@ -69,6 +69,24 @@ def test_resolve_request_timeout_falls_back_for_invalid_value() -> None:
 
 def test_resolve_api_key_supports_dashscope_env(monkeypatch) -> None:
     monkeypatch.delenv("NOCODE_API_KEY", raising=False)
+    monkeypatch.delenv("BAILIAN_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
     monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-secret")
 
-    assert resolve_api_key({}) == "dashscope-secret"
+    assert resolve_api_key({"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"}) == "dashscope-secret"
+
+
+def test_resolve_api_key_prefers_config_for_dashscope_over_unrelated_zhipu_env(monkeypatch) -> None:
+    monkeypatch.delenv("NOCODE_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.delenv("BAILIAN_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("ZHIPU_API_KEY", "zhipu-secret")
+
+    assert resolve_api_key(
+        {
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "api_key": "dashscope-config-secret",
+        }
+    ) == "dashscope-config-secret"
