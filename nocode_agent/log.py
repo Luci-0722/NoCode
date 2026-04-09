@@ -21,7 +21,7 @@ def setup_logging(level: str | None = None, log_file: str | None = None) -> None
     Log level is resolved from (in priority order):
       1. The *level* argument
       2. The ``NOCODE_LOG_LEVEL`` environment variable
-      3. Default: ``WARNING``
+      3. Default: ``INFO``
 
     Log file path is resolved from (in priority order):
       1. The *log_file* argument
@@ -35,10 +35,10 @@ def setup_logging(level: str | None = None, log_file: str | None = None) -> None
     resolved = (
         level
         or os.environ.get("NOCODE_LOG_LEVEL")
-        or "WARNING"
+        or "INFO"
     ).upper()
 
-    numeric = getattr(logging, resolved, logging.WARNING)
+    numeric = getattr(logging, resolved, logging.INFO)
 
     formatter = logging.Formatter(_DEFAULT_FORMAT, datefmt=_DEFAULT_DATE_FORMAT)
 

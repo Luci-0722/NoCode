@@ -25,6 +25,12 @@ api_key: "YOUR_API_KEY_HERE"
 #     - localhost
 #     - 127.0.0.1
 
+# 模型请求超时（秒）。默认 90 秒，避免长时间卡住无反馈。
+request_timeout: 90
+
+# 日志级别。默认 INFO；如需更多细节可改为 DEBUG。
+log_level: INFO
+
 max_tokens: 4096
 temperature: 0.7
 subagent_model: glm-5.1

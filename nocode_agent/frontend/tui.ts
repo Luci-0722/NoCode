@@ -218,6 +218,7 @@ class TypeScriptTui {
   private cursorRow = 0;
   private cursorCol = 0;
   private generating = false;
+  private generatingStartedAt = 0;
   private exiting = false;
   private lastFrame = "";
   private scrollOffset = 0;
@@ -264,6 +265,7 @@ class TypeScriptTui {
   private nativeSelectionMode = false;
   private nativeSelectionTimer: NodeJS.Timeout | null = null;
   private rawEscapeTimer: NodeJS.Timeout | null = null;
+  private generatingStatusTimer: NodeJS.Timeout | null = null;
 
   constructor() {
     this.resumeMode = process.argv.includes("--resume");
@@ -911,7 +913,7 @@ class TypeScriptTui {
         break;
       case "done":
         this.flushStreamingToHistory();
-        this.generating = false;
+        this.setGenerating(false);
         this.dispatchNextQueuedPrompt();
         break;
       case "retry":
@@ -926,11 +928,12 @@ class TypeScriptTui {
       case "fatal":
         this.pushHistory({ kind: "message", role: "system", content: `${event.type}: ${event.message}` });
         this.streaming = "";
-        this.generating = false;
+        this.setGenerating(false);
         this.pendingPrompts.length = 0;
         break;
       case "cancelled":
         this.pushHistory({ kind: "message", role: "system", content: "⏹ 已中断生成" });
+        this.setGenerating(false);
         this.pendingPrompts.length = 0;
         break;
       case "prompt_queued":
@@ -965,7 +968,7 @@ class TypeScriptTui {
         this.history.length = 0;
         this.streaming = "";
         this.pendingPrompts.length = 0;
-        this.generating = false;
+        this.setGenerating(false);
         this.selectedToolId = null;
         this.followLatestTool = true;
         this.scrollOffset = 0;
@@ -1083,9 +1086,48 @@ class TypeScriptTui {
   private dispatchPrompt(text: string, messageId: number): void {
     this.updateMessageState(messageId, "sent");
     this.streaming = "";
-    this.generating = true;
+    this.setGenerating(true);
     this.scrollOffset = 0;
     this.sendBackend({ type: "prompt", text });
+  }
+
+  private setGenerating(next: boolean): void {
+    this.generating = next;
+    if (next) {
+      this.generatingStartedAt = Date.now();
+      if (!this.generatingStatusTimer) {
+        // 定时刷新等待态文案，避免长时间无事件时界面“假死”。
+        this.generatingStatusTimer = setInterval(() => {
+          if (!this.generating) {
+            return;
+          }
+          this.render();
+        }, 1000);
+      }
+      return;
+    }
+
+    this.generatingStartedAt = 0;
+    if (this.generatingStatusTimer) {
+      clearInterval(this.generatingStatusTimer);
+      this.generatingStatusTimer = null;
+    }
+  }
+
+  private renderGeneratingPlaceholder(): string {
+    if (this.streaming) {
+      return this.streaming;
+    }
+    const elapsedSeconds = this.generatingStartedAt > 0
+      ? Math.max(0, Math.floor((Date.now() - this.generatingStartedAt) / 1000))
+      : 0;
+    if (elapsedSeconds >= 10) {
+      return `等待模型响应中... 已等待 ${elapsedSeconds}s\n可按 Esc 中断当前请求`;
+    }
+    if (elapsedSeconds >= 5) {
+      return `请求已发送，正在等待模型首包... ${elapsedSeconds}s`;
+    }
+    return "思考中...";
   }
 
   private dispatchNextQueuedPrompt(): void {
@@ -1905,7 +1947,7 @@ class TypeScriptTui {
         id: -1,
         kind: "message",
         role: "assistant",
-        content: this.streaming || "思考中...",
+        content: this.renderGeneratingPlaceholder(),
       }, width));
       lines.push("");
     }
@@ -2648,6 +2690,10 @@ class TypeScriptTui {
     if (this.rawEscapeTimer) {
       clearTimeout(this.rawEscapeTimer);
       this.rawEscapeTimer = null;
+    }
+    if (this.generatingStatusTimer) {
+      clearInterval(this.generatingStatusTimer);
+      this.generatingStatusTimer = null;
     }
     if (this.nativeSelectionTimer) {
       clearTimeout(this.nativeSelectionTimer);

@@ -37,7 +37,13 @@ from acp.schema import (
 )
 
 from nocode_agent.agent import MainAgent, create_mainagent
-from nocode_agent.config import load_config, resolve_api_key, resolve_no_proxy, resolve_proxy
+from nocode_agent.config import (
+    load_config,
+    resolve_api_key,
+    resolve_no_proxy,
+    resolve_proxy,
+    resolve_request_timeout,
+)
 from nocode_agent.log import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -200,6 +206,7 @@ class ACPAgentPool:
             mcp_servers=session_data.get("mcp_servers"),
             proxy=resolve_proxy(self._config),
             no_proxy=resolve_no_proxy(self._config),
+            request_timeout=resolve_request_timeout(self._config),
         )
         with self._lock:
             cached = self._agents.get(session_id)
@@ -444,8 +451,8 @@ class NoCodeAgent(Agent):
 
 async def main_async() -> int:
     args = _parse_args()
-    setup_logging()
     config = _build_runtime_config(args.config, args)
+    setup_logging(level=str(config.get("log_level", "") or None) if config.get("log_level") else None)
     logger.info("Starting NoCode ACP server (model=%s)", config.get("model", "glm-4-flash"))
     await run_agent(NoCodeAgent(config))
     return 0

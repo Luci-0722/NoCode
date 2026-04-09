@@ -10,7 +10,13 @@ import sys
 from typing import Any
 
 from nocode_agent.agent import create_mainagent
-from nocode_agent.config import load_config, resolve_api_key, resolve_no_proxy, resolve_proxy
+from nocode_agent.config import (
+    load_config,
+    resolve_api_key,
+    resolve_no_proxy,
+    resolve_proxy,
+    resolve_request_timeout,
+)
 from nocode_agent.log import setup_logging
 from nocode_agent.persistence import list_threads, load_thread_messages, resolve_checkpoint_path
 
@@ -39,6 +45,7 @@ async def _build_agent(config: dict[str, Any]):
         persistence_config=config,
         proxy=resolve_proxy(config),
         no_proxy=resolve_no_proxy(config),
+        request_timeout=resolve_request_timeout(config),
     )
 
 
@@ -51,6 +58,7 @@ _stream_task: asyncio.Task | None = None
 
 
 async def _stream_prompt(agent, prompt: str) -> None:
+    logger.info("Prompt started: thread=%s, chars=%d", getattr(agent, "thread_id", "-"), len(prompt))
     try:
         async for event_type, *data in agent.chat(prompt):
             if event_type == "runtime_event":
@@ -105,10 +113,13 @@ async def _stream_prompt(agent, prompt: str) -> None:
                 if isinstance(payload, dict):
                     _emit(payload)
     except asyncio.CancelledError:
+        logger.info("Prompt cancelled: thread=%s", getattr(agent, "thread_id", "-"))
         _emit({"type": "cancelled"})
     except Exception as error:
         logger.error("Stream error: %s", error, exc_info=True)
         _emit({"type": "error", "message": f"stream error: {error}"})
+    else:
+        logger.info("Prompt finished: thread=%s", getattr(agent, "thread_id", "-"))
     _emit({"type": "done"})
 
 
@@ -171,11 +182,12 @@ async def _handle_message(agent, payload: dict[str, Any], config: dict[str, Any]
 
 async def main() -> int:
     global _stream_task
-    setup_logging()
     try:
         config = _load_config()
+        setup_logging(level=str(config.get("log_level", "") or None) if config.get("log_level") else None)
         agent = await _build_agent(config)
     except Exception as error:
+        setup_logging()
         logger.error("Fatal error during initialization: %s", error)
         _emit({"type": "fatal", "message": str(error)})
         return 1
@@ -213,6 +225,7 @@ async def main() -> int:
                 _emit({"type": "error", "message": "empty prompt"})
                 continue
             if _stream_task and not _stream_task.done():
+                logger.info("Prompt queued: thread=%s, chars=%d", agent.thread_id, len(prompt))
                 await agent.enqueue_user_input(prompt)
                 _emit({"type": "prompt_queued", "text": prompt})
             else:
@@ -233,6 +246,7 @@ async def main() -> int:
         # ── Cancel: interrupt current stream ──────────────────────
         if message_type == "cancel":
             if _stream_task and not _stream_task.done():
+                logger.info("Prompt cancel requested: thread=%s", agent.thread_id)
                 _stream_task.cancel()
             continue
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from nocode_agent.agent import _build_no_proxy_mounts
-from nocode_agent.config import resolve_no_proxy, resolve_proxy
+from nocode_agent.config import resolve_no_proxy, resolve_proxy, resolve_request_timeout
 
 
 def test_resolve_proxy_supports_proxy_object() -> None:
@@ -52,3 +52,11 @@ def test_build_no_proxy_mounts_maps_hosts_to_httpx_patterns() -> None:
 
 def test_build_no_proxy_mounts_supports_wildcard_disable_proxy() -> None:
     assert _build_no_proxy_mounts(["*"]) == {"all://": None}
+
+
+def test_resolve_request_timeout_supports_positive_number() -> None:
+    assert resolve_request_timeout({"request_timeout": 45}) == 45.0
+
+
+def test_resolve_request_timeout_falls_back_for_invalid_value() -> None:
+    assert resolve_request_timeout({"request_timeout": "invalid"}, default=90.0) == 90.0

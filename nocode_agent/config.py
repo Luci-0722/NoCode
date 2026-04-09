@@ -134,3 +134,17 @@ def resolve_no_proxy(config: dict[str, Any]) -> list[str]:
         return _split_no_proxy_value(fallback_value)
 
     return []
+
+
+def resolve_request_timeout(config: dict[str, Any], default: float = 90.0) -> float:
+    """统一解析模型请求超时时间（秒）。"""
+    raw_value = config.get("request_timeout", default)
+    try:
+        timeout = float(raw_value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid request_timeout=%r, fallback to %.1f", raw_value, default)
+        return default
+    if timeout <= 0:
+        logger.warning("Non-positive request_timeout=%r, fallback to %.1f", raw_value, default)
+        return default
+    return timeout

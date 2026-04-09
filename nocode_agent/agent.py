@@ -171,7 +171,7 @@ class MainAgent:
 
     async def chat(self, user_input: str):
         """异步生成器，yield (event_type, *data)。包含自动重试。"""
-        logger.debug("chat() called: thread=%s, input=%s", self._thread_id[:20], user_input[:200])
+        logger.info("Chat started: thread=%s, chars=%d", self._thread_id[:20], len(user_input))
         await self._checkpointer.ensure_setup()
         config = {"configurable": {"thread_id": self._thread_id}}
         subgraph_meta_by_key: dict[tuple[str, ...], dict[str, str]] = {}
@@ -181,6 +181,7 @@ class MainAgent:
         base_delay = 2.0
 
         for attempt in range(max_retries + 1):
+            saw_first_token = False
             try:
                 async for chunk in self._agent.astream(
                     {"messages": [{"role": "user", "content": user_input}]},
@@ -225,6 +226,13 @@ class MainAgent:
                         if metadata.get("langgraph_node") != "model":
                             continue
                         if isinstance(token, AIMessageChunk) and token.text:
+                            if not saw_first_token:
+                                saw_first_token = True
+                                logger.info(
+                                    "Chat first token: thread=%s, attempt=%d",
+                                    self._thread_id[:20],
+                                    attempt + 1,
+                                )
                             yield ("text", token.text)
                         runtime_events = await self._interactive_broker.drain_events()
                         for event in runtime_events:
@@ -326,10 +334,23 @@ class MainAgent:
                 runtime_events = await self._interactive_broker.drain_events()
                 for event in runtime_events:
                     yield ("runtime_event", event)
+                logger.info(
+                    "Chat finished: thread=%s, attempt=%d, first_token=%s",
+                    self._thread_id[:20],
+                    attempt + 1,
+                    "yes" if saw_first_token else "no",
+                )
                 return
             except Exception as exc:
                 is_retryable = _is_retryable_error(exc)
                 if not is_retryable or attempt >= max_retries:
+                    logger.error(
+                        "Chat failed: thread=%s, attempt=%d, retryable=%s, error=%s",
+                        self._thread_id[:20],
+                        attempt + 1,
+                        is_retryable,
+                        exc,
+                    )
                     raise
 
                 delay = base_delay * (2 ** attempt)
@@ -417,6 +438,7 @@ def _build_model(
     max_tokens: int,
     proxy: str = "",
     no_proxy: list[str] | None = None,
+    request_timeout: float = 90.0,
 ) -> ChatOpenAI:
     kwargs: dict[str, Any] = dict(
         model=model,
@@ -425,16 +447,19 @@ def _build_model(
         temperature=temperature,
         max_tokens=max_tokens,
         max_retries=6,
+        timeout=request_timeout,
     )
     if proxy:
         # 用显式 httpx client 支持 no_proxy，而不是仅传 openai_proxy。
         kwargs["http_client"] = httpx.Client(
             proxy=proxy,
             mounts=_build_no_proxy_mounts(no_proxy),
+            timeout=request_timeout,
         )
         kwargs["http_async_client"] = httpx.AsyncClient(
             proxy=proxy,
             mounts=_build_no_proxy_mounts(no_proxy),
+            timeout=request_timeout,
         )
     return ChatOpenAI(**kwargs)
 
@@ -574,11 +599,12 @@ async def create_mainagent(
     mcp_servers: list[Any] | None = None,
     proxy: str = "",
     no_proxy: list[str] | None = None,
+    request_timeout: float = 90.0,
 ) -> MainAgent:
     """创建主代理和代码子代理。"""
     logger.info(
-        "Creating MainAgent: model=%s, base_url=%s, max_tokens=%d, temperature=%.2f, proxy=%s, no_proxy=%s",
-        model, base_url, max_tokens, temperature, proxy or "(none)", ",".join(no_proxy or []) or "(none)",
+        "Creating MainAgent: model=%s, base_url=%s, max_tokens=%d, temperature=%.2f, proxy=%s, no_proxy=%s, timeout=%.1fs",
+        model, base_url, max_tokens, temperature, proxy or "(none)", ",".join(no_proxy or []) or "(none)", request_timeout,
     )
     context_window = _resolve_context_window(model)
     checkpointer = CheckpointerManager(resolve_checkpoint_path(persistence_config))
@@ -592,6 +618,7 @@ async def create_mainagent(
         max_tokens=max_tokens,
         proxy=proxy,
         no_proxy=no_proxy,
+        request_timeout=request_timeout,
     )
     subagent_llm = _build_model(
         api_key=api_key,
@@ -601,6 +628,7 @@ async def create_mainagent(
         max_tokens=max_tokens,
         proxy=proxy,
         no_proxy=no_proxy,
+        request_timeout=request_timeout,
     )
 
     # ── Session Memory (Layer 2) ──────────────────────────────
@@ -616,6 +644,7 @@ async def create_mainagent(
             max_tokens=4096,
             proxy=proxy,
             no_proxy=no_proxy,
+            request_timeout=request_timeout,
         )
         sm_extractor = SessionMemoryExtractor(
             config=sm_config,
@@ -636,6 +665,7 @@ async def create_mainagent(
             max_tokens=ac_config.max_summary_tokens,
             proxy=proxy,
             no_proxy=no_proxy,
+            request_timeout=request_timeout,
         )
         auto_compactor = AutoCompactor(
             config=ac_config,
