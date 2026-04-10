@@ -306,10 +306,12 @@ class TypeScriptTui {
     const python = process.env.PYTHON_BIN || (fs.existsSync(localPython) ? localPython : (process.platform === "win32" ? "python" : "python3"));
     this.backend = spawn(python, ["-m", "nocode_agent.backend_stdio"], {
       cwd: process.cwd(),
-      stdio: ["pipe", "pipe", "inherit"],
+      stdio: ["pipe", "pipe", "pipe"],  // stderr 也用 pipe，避免日志穿透 TUI
     });
 
     this.backend.stdout.setEncoding("utf8");
+    // 消费 stderr 避免 buffer 满阻塞，但不显示（避免穿透 TUI）
+    this.backend.stderr.on("data", () => {});
     this.backend.stdout.on("data", (chunk: string) => {
       this.backendBuffer += chunk;
       let newlineIndex = this.backendBuffer.indexOf("\n");
