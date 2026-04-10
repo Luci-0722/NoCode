@@ -1974,8 +1974,6 @@ class TypeScriptTui {
   }
 
   private renderHeader(width: number): string[] {
-    const meta = `${this.model} · thread ${this.threadId.slice(-8) || "--------"}`;
-    const cwd = this.truncate(this.cwd, Math.max(20, width - 18));
     const logo = [
       "█▄  █  ▄██▄",
       "█ ▀ █  █  █",
@@ -1983,8 +1981,8 @@ class TypeScriptTui {
     ];
     const generatingStatus = this.renderGeneratingStatus(width - this.visibleLength(logo[2]) - 2);
     return [
-      `${COLOR.accent}${COLOR.bold}${logo[0]}${COLOR.reset}  ${COLOR.secondary}${this.truncate(meta, Math.max(12, width - 16))}${COLOR.reset}`,
-      `${COLOR.accent}${COLOR.bold}${logo[1]}${COLOR.reset}  ${COLOR.secondary}${cwd}${COLOR.reset}`,
+      `${COLOR.accent}${COLOR.bold}${logo[0]}${COLOR.reset}`,
+      `${COLOR.accent}${COLOR.bold}${logo[1]}${COLOR.reset}`,
       `${COLOR.accent}${COLOR.bold}${logo[2]}${COLOR.reset}${generatingStatus ? `  ${generatingStatus}` : ""}`,
     ];
   }
@@ -1997,6 +1995,10 @@ class TypeScriptTui {
     const visible = blocks.slice(start, start + height);
     void headerHeight;
     const lines: string[] = [];
+    const paddingTop = Math.max(0, height - visible.length);
+    for (let index = 0; index < paddingTop; index += 1) {
+      lines.push("");
+    }
     lines.push(...visible);
     while (lines.length < height) {
       lines.push("");
@@ -2569,8 +2571,9 @@ class TypeScriptTui {
   private renderContextStatusLine(width: number): string {
     const modelLabel = [this.model, this.reasoningEffort].filter(Boolean).join(" ");
     const leftText = `${this.tokensLeftPercent}% left`;
+    const threadLabel = `thread ${this.threadId.slice(-8) || "--------"}`;
     const cwd = this.tildePath(this.cwd);
-    const text = `${modelLabel || "-"} · ${leftText} · ${cwd}`;
+    const text = `${threadLabel} · ${modelLabel || "-"} · ${leftText} · ${cwd}`;
     return `${COLOR.secondary}${this.truncate(text, width)}${COLOR.reset}`;
   }
 
