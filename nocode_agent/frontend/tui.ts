@@ -1126,9 +1126,6 @@ class TypeScriptTui {
     if (elapsedSeconds >= 10) {
       return `等待模型响应中... 已等待 ${elapsedSeconds}s\n可按 Esc 中断当前请求`;
     }
-    if (elapsedSeconds >= 5) {
-      return `请求已发送，正在等待模型首包... ${elapsedSeconds}s`;
-    }
     return "思考中...";
   }
 
