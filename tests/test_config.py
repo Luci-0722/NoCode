@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from nocode_agent.agent import _build_no_proxy_mounts
 from nocode_agent.config import (
+    normalize_model_base_url,
     resolve_api_key,
     resolve_model_provider,
     resolve_no_proxy,
@@ -115,6 +116,20 @@ def test_resolve_api_key_supports_dashscope_claude_proxy_env(monkeypatch) -> Non
     assert (
         resolve_api_key({"base_url": "https://dashscope.aliyuncs.com/api/v2/apps/claude-code-proxy"})
         == "dashscope-secret"
+    )
+
+
+def test_normalize_model_base_url_trims_openai_chat_completions_path() -> None:
+    assert (
+        normalize_model_base_url("https://coding.dashscope.aliyuncs.com/v1/chat/completions")
+        == "https://coding.dashscope.aliyuncs.com/v1"
+    )
+
+
+def test_normalize_model_base_url_trims_anthropic_messages_path() -> None:
+    assert (
+        normalize_model_base_url("https://coding.dashscope.aliyuncs.com/apps/anthropic/v1/messages")
+        == "https://coding.dashscope.aliyuncs.com/apps/anthropic"
     )
 
 

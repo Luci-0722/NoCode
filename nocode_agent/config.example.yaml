@@ -12,6 +12,7 @@ api_key: "YOUR_API_KEY_HERE"
 ## 阿里百炼 Coding Plan（专用 key 通常以 sk-sp- 开头）
 # 当前运行时已同时支持 OpenAI 兼容和 Anthropic 风格协议。
 # 如使用 glm/qwen 等 OpenAI 兼容模型，优先使用这个地址。
+# 注意：base_url 只填基地址，不要填成 `/chat/completions` 这种完整接口路径。
 # model: glm-5
 # base_url: "https://coding.dashscope.aliyuncs.com/v1"
 # api_key: "YOUR_SK_SP_API_KEY"

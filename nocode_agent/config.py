@@ -63,16 +63,35 @@ def load_config(config_path: str | None = None) -> dict[str, Any]:
 
 def _is_local_base_url(base_url: str) -> bool:
     """判断模型服务是否指向本机，便于兼容 Ollama 这类本地服务。"""
-    raw = str(base_url or "").strip()
+    raw = normalize_model_base_url(base_url)
     if not raw:
         return False
     host = (urlparse(raw).hostname or "").strip().lower()
     return host in {"localhost", "127.0.0.1", "0.0.0.0"}
 
 
+def normalize_model_base_url(base_url: str) -> str:
+    """把误填的完整接口地址裁剪成客户端需要的基地址。"""
+    raw = str(base_url or "").strip().rstrip("/")
+    if not raw:
+        return ""
+
+    suffixes = (
+        "/chat/completions",
+        "/responses",
+        "/v1/messages",
+        "/messages",
+    )
+    lowered = raw.lower()
+    for suffix in suffixes:
+        if lowered.endswith(suffix):
+            return raw[: -len(suffix)] or raw
+    return raw
+
+
 def _provider_from_base_url(base_url: str) -> str:
     """根据 base_url 推断当前模型供应商。"""
-    parsed = urlparse(str(base_url or "").strip())
+    parsed = urlparse(normalize_model_base_url(base_url))
     host = (parsed.hostname or "").strip().lower()
     path = (parsed.path or "").strip().lower()
     if not host:

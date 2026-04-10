@@ -34,3 +34,17 @@ def test_build_model_uses_openai_client_for_openai_compatible_base_url() -> None
 
     assert isinstance(model, ChatOpenAI)
     assert model.openai_api_base == "https://coding.dashscope.aliyuncs.com/v1"
+
+
+def test_build_model_normalizes_openai_endpoint_url() -> None:
+    model = _build_model(
+        api_key="test-key",
+        model="glm-5",
+        base_url="https://coding.dashscope.aliyuncs.com/v1/chat/completions",
+        temperature=0.7,
+        max_tokens=128,
+        request_timeout=30.0,
+    )
+
+    assert isinstance(model, ChatOpenAI)
+    assert model.openai_api_base == "https://coding.dashscope.aliyuncs.com/v1"
