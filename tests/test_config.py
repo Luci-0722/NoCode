@@ -5,6 +5,7 @@ from __future__ import annotations
 from nocode_agent.agent import _build_no_proxy_mounts
 from nocode_agent.config import (
     resolve_api_key,
+    resolve_model_provider,
     resolve_no_proxy,
     resolve_proxy,
     resolve_request_timeout,
@@ -114,4 +115,11 @@ def test_resolve_api_key_supports_dashscope_claude_proxy_env(monkeypatch) -> Non
     assert (
         resolve_api_key({"base_url": "https://dashscope.aliyuncs.com/api/v2/apps/claude-code-proxy"})
         == "dashscope-secret"
+    )
+
+
+def test_resolve_model_provider_supports_dashscope_anthropic_path() -> None:
+    assert (
+        resolve_model_provider({"base_url": "https://coding.dashscope.aliyuncs.com/apps/anthropic"})
+        == "anthropic"
     )

@@ -12,6 +12,8 @@ from uuid import uuid4
 
 import httpx
 from langchain.agents import create_agent
+from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langchain_openai import ChatOpenAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -26,6 +28,7 @@ from nocode_agent.compression import (
     build_auto_compact_config,
     build_session_memory_config,
 )
+from nocode_agent.config import resolve_model_provider
 from nocode_agent.interactive import InteractiveSessionBroker, PendingUserInputMiddleware
 from nocode_agent.persistence import CheckpointerManager, resolve_checkpoint_path
 from nocode_agent.prompts import (
@@ -439,7 +442,29 @@ def _build_model(
     proxy: str = "",
     no_proxy: list[str] | None = None,
     request_timeout: float = 90.0,
-) -> ChatOpenAI:
+) -> BaseChatModel:
+    provider = resolve_model_provider({"base_url": base_url})
+    if provider == "anthropic":
+        kwargs: dict[str, Any] = dict(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            max_retries=6,
+            timeout=request_timeout,
+        )
+        if proxy:
+            kwargs["anthropic_proxy"] = proxy
+        if proxy and no_proxy:
+            # Anthropic 客户端暂不支持像 OpenAI 客户端那样显式挂载 no_proxy 规则。
+            logger.warning(
+                "Anthropic client ignores explicit no_proxy mounts; proxy=%s, no_proxy=%s",
+                proxy,
+                ",".join(no_proxy),
+            )
+        return ChatAnthropic(**kwargs)
+
     kwargs: dict[str, Any] = dict(
         model=model,
         api_key=api_key,

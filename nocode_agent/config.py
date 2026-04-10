@@ -79,7 +79,9 @@ def _provider_from_base_url(base_url: str) -> str:
         return ""
     if "anthropic.com" in host:
         return "anthropic"
-    if "dashscope.aliyuncs.com" in host and "claude-code-proxy" in path:
+    if "dashscope.aliyuncs.com" in host and (
+        "claude-code-proxy" in path or "/apps/anthropic" in path
+    ):
         return "anthropic"
     if "dashscope.aliyuncs.com" in host:
         return "dashscope"
@@ -90,13 +92,18 @@ def _provider_from_base_url(base_url: str) -> str:
     return ""
 
 
+def resolve_model_provider(config: dict[str, Any]) -> str:
+    """解析当前配置对应的模型协议供应商。"""
+    return _provider_from_base_url(str(config.get("base_url", "") or ""))
+
+
 def resolve_api_key(config: dict[str, Any]) -> str:
     """统一解析模型 API Key。
 
     优先读取与当前供应商匹配的环境变量；如果目标是本地模型服务且未提供 key，
     则返回占位值，满足 OpenAI 兼容客户端的参数要求。
     """
-    provider = _provider_from_base_url(str(config.get("base_url", "") or ""))
+    provider = resolve_model_provider(config)
     env_candidates: list[str] = ["NOCODE_API_KEY"]
     if provider == "anthropic":
         env_candidates.extend(["ANTHROPIC_API_KEY", "DASHSCOPE_API_KEY", "BAILIAN_API_KEY"])

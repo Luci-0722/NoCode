@@ -10,18 +10,18 @@ api_key: "YOUR_API_KEY_HERE"
 # export DASHSCOPE_API_KEY="YOUR_DASHSCOPE_API_KEY"
 
 ## 阿里百炼 Coding Plan（专用 key 通常以 sk-sp- 开头）
-# 本项目当前运行时基于 ChatOpenAI；如直接使用 NoCode，请优先使用这个 OpenAI 兼容地址。
+# 当前运行时已同时支持 OpenAI 兼容和 Anthropic 风格协议。
+# 如使用 glm/qwen 等 OpenAI 兼容模型，优先使用这个地址。
 # model: glm-5
 # base_url: "https://coding.dashscope.aliyuncs.com/v1"
 # api_key: "YOUR_SK_SP_API_KEY"
 
 ## 阿里百炼 Claude Code 代理（Anthropic 风格 URL）
-# 注意：当前运行时仍然使用 OpenAI 兼容客户端，如果目标服务要求原生 Anthropic `/v1/messages`
-# 协议，则还需要额外适配调用客户端。
+# 如使用 Anthropic 风格接口，可配置这个地址。
 # model: claude-sonnet-4-5
 # base_url: "https://coding.dashscope.aliyuncs.com/apps/anthropic"
 # 推荐使用环境变量，避免把密钥写入文件：
-# export ANTHROPIC_API_KEY="YOUR_API_KEY"
+# export ANTHROPIC_API_KEY="YOUR_SK_SP_API_KEY"
 
 ## Ollama 本地配置
 # model: qwen2.5-coder:14b
