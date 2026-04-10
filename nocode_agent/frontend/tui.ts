@@ -1181,8 +1181,8 @@ class TypeScriptTui {
     const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
     const frameIndex = Math.floor(elapsedMs / 80) % this.generatingSpinnerFrames.length;
     const frame = this.generatingSpinnerFrames[frameIndex] ?? this.generatingSpinnerFrames[0];
-    const label = autoCompactActive ? "正在压缩上下文" : "正在处理中";
-    const text = `${COLOR.warning}${COLOR.bold}${frame}${COLOR.reset} ${COLOR.bold}${label}${COLOR.reset} ${COLOR.secondary}(${elapsedSeconds}s · esc 可中断)${COLOR.reset}`;
+    const label = autoCompactActive ? "Compacting" : "Working";
+    const text = `${COLOR.warning}${COLOR.bold}${frame}${COLOR.reset} ${COLOR.bold}${label}${COLOR.reset} ${COLOR.secondary}(${elapsedSeconds}s • esc to interrupt)${COLOR.reset}`;
     return this.truncateAnsiAware(text, Math.max(12, width));
   }
 
