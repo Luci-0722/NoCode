@@ -106,6 +106,17 @@ type QuestionAnswer = {
   selected: string[];
 };
 
+type SlashCommandAction = "help" | "clear" | "session" | "resume" | "quit";
+
+type SlashCommandDefinition = {
+  action: SlashCommandAction;
+  name: string;
+  description: string;
+  argumentHint?: string;
+  acceptsArgs?: boolean;
+  aliases?: string[];
+};
+
 type StatusPayload = {
   thread_id: string;
   model: string;
@@ -225,6 +236,44 @@ const COLOR = {
 // 选区颜色（半透明蓝底）
 const SELECTION_BG = "\x1b[48;2;40;70;110m";
 
+const SLASH_COMMANDS: SlashCommandDefinition[] = [
+  {
+    action: "help",
+    name: "help",
+    description: "查看可用命令与快捷键",
+  },
+  {
+    action: "clear",
+    name: "clear",
+    description: "清空当前会话内容",
+  },
+  {
+    action: "session",
+    name: "session",
+    description: "刷新并显示当前会话状态",
+  },
+  {
+    action: "resume",
+    name: "resume",
+    description: "恢复历史会话",
+    argumentHint: "[thread-id|关键词]",
+    acceptsArgs: true,
+  },
+  {
+    action: "resume",
+    name: "continue",
+    description: "恢复历史会话（/resume 别名）",
+    argumentHint: "[thread-id|关键词]",
+    acceptsArgs: true,
+  },
+  {
+    action: "quit",
+    name: "quit",
+    description: "退出 NoCode",
+    aliases: ["exit"],
+  },
+];
+
 class TypeScriptTui {
   private readonly generatingSpinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   private readonly version = "NoCode";
@@ -256,6 +305,8 @@ class TypeScriptTui {
   private nextSubagentToolId = 1;
   private selectedToolId: number | null = null;
   private followLatestTool = true;
+  private slashCommandIndex = 0;
+  private lastSlashCommandQuery = "";
   // ── Resume / session picker state ──────────────────────────
   private readonly resumeMode: boolean;
   private showSessionPicker = false;
@@ -485,6 +536,9 @@ class TypeScriptTui {
       if (key.shift) {
         this.insertNewline();
       } else {
+        if (this.acceptSelectedSlashCommand(false)) {
+          return;
+        }
         this.submitInput();
       }
       return;
@@ -505,11 +559,17 @@ class TypeScriptTui {
     }
 
     if (key.name === "up") {
+      if (this.moveSlashCommandSelection(-1)) {
+        return;
+      }
       this.moveCursor(-1, 0);
       return;
     }
 
     if (key.name === "down") {
+      if (this.moveSlashCommandSelection(1)) {
+        return;
+      }
       this.moveCursor(1, 0);
       return;
     }
@@ -525,6 +585,9 @@ class TypeScriptTui {
     }
 
     if (key.name === "tab") {
+      if (this.acceptSelectedSlashCommand(true)) {
+        return;
+      }
       this.insertText("  ");
       return;
     }
@@ -1058,6 +1121,140 @@ class TypeScriptTui {
     this.tokensLeftPercent = Math.max(0, Math.min(100, payload.tokens_left_percent || 0));
   }
 
+  // 仅在“/命令名”输入阶段显示候选；进入参数区后不再弹出。
+  private getActiveSlashCommandMenu(): { query: string; suggestions: SlashCommandDefinition[] } | null {
+    if (this.inputLines.length !== 1 || this.cursorRow !== 0) {
+      this.slashCommandIndex = 0;
+      this.lastSlashCommandQuery = "";
+      return null;
+    }
+
+    const line = this.inputLines[0] ?? "";
+    if (!line.startsWith("/")) {
+      this.slashCommandIndex = 0;
+      this.lastSlashCommandQuery = "";
+      return null;
+    }
+
+    const afterSlash = line.slice(1);
+    const hasWhitespace = /\s/.test(afterSlash);
+    if (hasWhitespace) {
+      this.slashCommandIndex = 0;
+      this.lastSlashCommandQuery = "";
+      return null;
+    }
+
+    const query = afterSlash.toLowerCase();
+    const suggestions = this.getSlashCommandSuggestions(query);
+    if (suggestions.length === 0) {
+      this.slashCommandIndex = 0;
+      this.lastSlashCommandQuery = query;
+      return null;
+    }
+
+    if (this.lastSlashCommandQuery !== query) {
+      this.slashCommandIndex = 0;
+      this.lastSlashCommandQuery = query;
+    }
+    this.slashCommandIndex = Math.max(0, Math.min(suggestions.length - 1, this.slashCommandIndex));
+    return { query, suggestions };
+  }
+
+  private getSlashCommandSuggestions(query: string): SlashCommandDefinition[] {
+    const normalized = query.trim().toLowerCase();
+    const visibleCommands = SLASH_COMMANDS;
+    if (!normalized) {
+      return [...visibleCommands];
+    }
+
+    return [...visibleCommands]
+      .filter((command) =>
+        command.name.startsWith(normalized)
+        || command.aliases?.some((alias) => alias.startsWith(normalized)),
+      )
+      .sort((left, right) => {
+        const leftNameMatch = left.name.startsWith(normalized) ? 0 : 1;
+        const rightNameMatch = right.name.startsWith(normalized) ? 0 : 1;
+        if (leftNameMatch !== rightNameMatch) {
+          return leftNameMatch - rightNameMatch;
+        }
+        return left.name.localeCompare(right.name);
+      });
+  }
+
+  private findSlashCommand(name: string): SlashCommandDefinition | null {
+    const normalized = name.trim().toLowerCase();
+    if (!normalized) {
+      return null;
+    }
+
+    const exact = SLASH_COMMANDS.find((command) => command.name === normalized);
+    if (exact) {
+      return exact;
+    }
+
+    return SLASH_COMMANDS.find((command) => command.aliases?.includes(normalized)) || null;
+  }
+
+  private moveSlashCommandSelection(delta: number): boolean {
+    const menu = this.getActiveSlashCommandMenu();
+    if (!menu) {
+      return false;
+    }
+
+    this.slashCommandIndex = Math.max(0, Math.min(menu.suggestions.length - 1, this.slashCommandIndex + delta));
+    this.render();
+    return true;
+  }
+
+  private acceptSelectedSlashCommand(forceApply: boolean): boolean {
+    const menu = this.getActiveSlashCommandMenu();
+    if (!menu) {
+      return false;
+    }
+
+    const selected = menu.suggestions[this.slashCommandIndex];
+    if (!selected) {
+      return false;
+    }
+
+    const currentToken = (this.inputLines[0] ?? "").slice(1).trim().toLowerCase();
+    const isExactMatch = currentToken === selected.name
+      || selected.aliases?.includes(currentToken)
+      || false;
+    if (!forceApply && isExactMatch) {
+      return false;
+    }
+
+    const nextInput = `/${selected.name}${selected.acceptsArgs ? " " : ""}`;
+    this.inputLines.splice(0, this.inputLines.length, nextInput);
+    this.cursorRow = 0;
+    this.cursorCol = nextInput.length;
+    this.render();
+    return true;
+  }
+
+  private buildSlashCommandHelpText(): string {
+    const lines = [
+      "Slash commands:",
+      ...SLASH_COMMANDS.map((command) => {
+        const label = `/${command.name}${command.argumentHint ? ` ${command.argumentHint}` : ""}`;
+        const aliases = command.aliases?.length ? ` (别名: ${command.aliases.map((alias) => `/${alias}`).join(", ")})` : "";
+        return `  ${label}  ${command.description}${aliases}`;
+      }),
+      "",
+      "输入 / 会自动弹出命令候选，可用 ↑/↓ 选择，Tab 补全，Enter 执行。",
+      "ESC 清空输入 / 中断生成",
+      "Enter 发送，Shift+Enter 换行",
+      `拖拽可选择文本${this.copyOnSelect ? "并自动复制" : "，按 Ctrl+C 复制"}`,
+      this.getNativeSelectionHint(),
+      "Ctrl+J/K 选择工具，Ctrl+O 展开工具",
+      "/resume 与 /continue 支持直接输入 thread id 后缀或预览关键词进行过滤恢复",
+      "环境变量: NOCODE_COPY_ON_SELECT=0/1, NOCODE_SCROLL_SPEED=<number>",
+    ];
+    return lines.join("\n");
+  }
+
   private submitInput(): void {
     const text = this.inputLines.join("\n").trim();
     if (!text) {
@@ -1087,44 +1284,45 @@ class TypeScriptTui {
   private runCommand(text: string): void {
     const trimmed = text.trim();
     const [rawName, ...restParts] = trimmed.slice(1).split(/\s+/);
-    const commandName = (rawName || "").toLowerCase();
+    const command = this.findSlashCommand(rawName || "");
     const args = restParts.join(" ").trim();
     this.clearInput();
 
-    if (commandName === "quit" || commandName === "exit") {
-      this.exiting = true;
-      this.shutdown();
-      process.exit(0);
-    }
-
-    if (commandName === "clear") {
-      this.sendBackend({ type: "clear" });
+    if (!command) {
+      this.pushHistory({ kind: "message", role: "system", content: `unknown command: ${text}` });
       this.render();
       return;
     }
 
-    if (commandName === "session") {
-      this.sendBackend({ type: "status" });
-      return;
+    switch (command.action) {
+      case "quit":
+        this.exiting = true;
+        this.shutdown();
+        process.exit(0);
+        break;
+      case "clear":
+        this.sendBackend({ type: "clear" });
+        this.render();
+        break;
+      case "session":
+        this.sendBackend({ type: "status" });
+        break;
+      case "resume":
+        this.openSessionPicker(args);
+        break;
+      case "help":
+        this.pushHistory({
+          kind: "message",
+          role: "system",
+          content: this.buildSlashCommandHelpText(),
+        });
+        this.render();
+        break;
+      default:
+        this.pushHistory({ kind: "message", role: "system", content: `unknown command: ${text}` });
+        this.render();
+        break;
     }
-
-    if (commandName === "resume" || commandName === "continue") {
-      this.openSessionPicker(args);
-      return;
-    }
-
-    if (commandName === "help") {
-      this.pushHistory({
-        kind: "message",
-        role: "system",
-        content: `Commands: /help /clear /session /resume [/continue] /quit\nESC 清空输入 / 中断生成\nEnter 发送，Shift+Enter 换行\n拖拽可选择文本${this.copyOnSelect ? "并自动复制" : "，按 Ctrl+C 复制"}\n${this.getNativeSelectionHint()}\nCtrl+J/K 选择工具，Ctrl+O 展开工具\n/resume 支持直接输入 thread id 后缀或预览关键词进行过滤恢复\n环境变量: NOCODE_COPY_ON_SELECT=0/1, NOCODE_SCROLL_SPEED=<number>`,
-      });
-      this.render();
-      return;
-    }
-
-    this.pushHistory({ kind: "message", role: "system", content: `unknown command: ${text}` });
-    this.render();
   }
 
   private pushHistory(message: Omit<Message, "id">): number {
@@ -1445,11 +1643,54 @@ class TypeScriptTui {
   private getTranscriptLayout(width: number): { transcriptHeight: number } {
     const height = process.stdout.rows || 40;
     const headerHeight = this.renderHeader(width).length;
+    const slashCommandMenuHeight = this.renderSlashCommandMenu(width).length;
     const composerHeight = this.renderComposer(width).length;
     const footerHeight = this.renderFooter(width).length;
     return {
-      transcriptHeight: Math.max(8, height - headerHeight - composerHeight - footerHeight),
+      transcriptHeight: Math.max(8, height - headerHeight - slashCommandMenuHeight - composerHeight - footerHeight),
     };
+  }
+
+  private renderSlashCommandMenu(width: number): string[] {
+    const menu = this.getActiveSlashCommandMenu();
+    if (!menu) {
+      return [];
+    }
+
+    const maxVisibleItems = 5;
+    const startIndex = Math.max(
+      0,
+      Math.min(
+        this.slashCommandIndex - Math.floor(maxVisibleItems / 2),
+        menu.suggestions.length - maxVisibleItems,
+      ),
+    );
+    const endIndex = Math.min(menu.suggestions.length, startIndex + maxVisibleItems);
+    const nameWidth = Math.max(10, Math.min(Math.floor(width * 0.4), Math.max(10, width - 6)));
+    const lines: string[] = [];
+
+    for (let index = startIndex; index < endIndex; index += 1) {
+      const command = menu.suggestions[index];
+      const selected = index === this.slashCommandIndex;
+      const label = `/${command.name}${command.argumentHint ? ` ${command.argumentHint}` : ""}`;
+      const paddedLabel = this.padRight(
+        `${COLOR.accent}${COLOR.bold}${label}${COLOR.reset}`,
+        Math.min(nameWidth, Math.max(10, width - 4)),
+      );
+      const descriptionWidth = Math.max(0, width - this.visibleLength(paddedLabel) - 4);
+      const description = descriptionWidth > 0
+        ? `${COLOR.soft}${this.truncate(command.description, descriptionWidth)}${COLOR.reset}`
+        : "";
+      const content = description ? `${paddedLabel}  ${description}` : paddedLabel;
+      const visibleContent = this.truncateAnsiAware(content, Math.max(10, width - 2));
+      if (selected) {
+        lines.push(this.renderSelectedRow(visibleContent, width, "▸"));
+      } else {
+        lines.push(`  ${visibleContent}`);
+      }
+    }
+
+    return lines;
   }
 
   // ── Session picker helpers ────────────────────────────────
@@ -1932,12 +2173,13 @@ class TypeScriptTui {
       return;
     }
 
+    const slashCommandMenu = this.renderSlashCommandMenu(width);
     const composer = this.renderComposer(width);
     const footer = this.renderFooter(width);
-    const reserved = header.length + composer.length + footer.length;
+    const reserved = header.length + slashCommandMenu.length + composer.length + footer.length;
     const transcriptHeight = Math.max(8, height - reserved);
     const transcript = this.renderTranscript(width, transcriptHeight, header.length);
-    const frameLines = [...header, ...transcript, ...composer, ...footer];
+    const frameLines = [...header, ...transcript, ...slashCommandMenu, ...composer, ...footer];
     const frame = frameLines.join("\n");
 
     if (frame !== this.lastFrame) {
@@ -1947,7 +2189,7 @@ class TypeScriptTui {
     }
 
     this.renderSelectionOverlay();
-    this.positionCursor(width, header.length + transcript.length);
+    this.positionCursor(width, header.length + transcript.length + slashCommandMenu.length);
   }
 
   /** 在已渲染的帧上叠加选区高亮 */
@@ -2011,7 +2253,7 @@ class TypeScriptTui {
 
     if (this.history.length === 0 && !this.generating) {
       lines.push("");
-      lines.push(`${COLOR.secondary}  使用 /help 查看命令，直接输入即可开始对话。${COLOR.reset}`);
+      lines.push(`${COLOR.secondary}  输入 / 打开命令列表，或使用 /help 查看全部命令。${COLOR.reset}`);
       return lines;
     }
 
@@ -2564,7 +2806,8 @@ class TypeScriptTui {
       : `  ${this.getNativeSelectionHint()}`;
     const wheelMode = this.xtermJsLike ? "wheel decay" : "wheel native";
     const nativeSelectionState = this.nativeSelectionMode ? "  native-select active" : "";
-    const text = `Enter submit  Shift+Enter newline  Ctrl+J/K tool  Ctrl+O expand  ${wheelMode}${selection}${nativeSelectionState}  ${state}${queue}${scroll}`;
+    const slashMenu = this.getActiveSlashCommandMenu() ? "  ↑↓ 选命令  Tab 补全" : "";
+    const text = `Enter submit  Shift+Enter newline${slashMenu}  Ctrl+J/K tool  Ctrl+O expand  ${wheelMode}${selection}${nativeSelectionState}  ${state}${queue}${scroll}`;
     return ["", statusLine, `${COLOR.secondary}${this.truncate(text, width)}${COLOR.reset}`];
   }
 
