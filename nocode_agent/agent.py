@@ -136,6 +136,8 @@ class MainAgent:
         thread_id: str | None = None,
         model_name: str = "",
         subagent_model_name: str = "",
+        context_window: int = 128_000,
+        reasoning_effort: str = "",
     ):
         self._agent = agent
         self._checkpointer = checkpointer
@@ -143,6 +145,8 @@ class MainAgent:
         self._thread_id = thread_id or self._new_thread_id()
         self._model_name = model_name
         self._subagent_model_name = subagent_model_name
+        self._context_window = context_window
+        self._reasoning_effort = reasoning_effort
 
     @staticmethod
     def _new_thread_id() -> str:
@@ -159,6 +163,14 @@ class MainAgent:
     @property
     def subagent_model_name(self) -> str:
         return self._subagent_model_name
+
+    @property
+    def context_window(self) -> int:
+        return self._context_window
+
+    @property
+    def reasoning_effort(self) -> str:
+        return self._reasoning_effort
 
     async def clear(self):
         await self._checkpointer.delete_thread(self._thread_id)
@@ -815,6 +827,15 @@ async def create_mainagent(
         name="mainagent_supervisor",
     )
 
+    reasoning_config = persistence_config.get("reasoning") if isinstance(persistence_config, dict) else {}
+    reasoning_effort = str(
+        (
+            (persistence_config or {}).get("reasoning_effort")
+            or (reasoning_config.get("effort") if isinstance(reasoning_config, dict) else "")
+            or ""
+        )
+    ).strip()
+
     logger.info("MainAgent created: thread_id=%s, context_window=%d", resolved_thread_id, context_window)
 
     return MainAgent(
@@ -824,4 +845,6 @@ async def create_mainagent(
         thread_id=resolved_thread_id,
         model_name=model,
         subagent_model_name=subagent_model or model,
+        context_window=context_window,
+        reasoning_effort=reasoning_effort,
     )

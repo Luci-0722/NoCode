@@ -106,9 +106,20 @@ type QuestionAnswer = {
   selected: string[];
 };
 
+type StatusPayload = {
+  thread_id: string;
+  model: string;
+  subagent_model: string;
+  reasoning_effort: string;
+  cwd: string;
+  context_window: number;
+  estimated_tokens: number;
+  tokens_left_percent: number;
+};
+
 type BackendEvent =
-  | { type: "hello"; thread_id: string; model: string; subagent_model: string; cwd: string }
-  | { type: "status"; thread_id: string; model: string; subagent_model: string; cwd: string }
+  | ({ type: "hello" } & StatusPayload)
+  | ({ type: "status" } & StatusPayload)
   | { type: "cleared"; thread_id: string }
   | { type: "text"; delta: string }
   | { type: "retry"; message: string; attempt: number; max_retries: number; delay: number }
@@ -163,7 +174,7 @@ type BackendEvent =
   | { type: "prompt_queued"; text: string }
   | { type: "queued_prompt_injected"; texts: string[] }
   | { type: "thread_list"; threads: ThreadInfo[] }
-  | { type: "resumed"; thread_id: string; model: string; subagent_model: string; cwd: string }
+  | ({ type: "resumed" } & StatusPayload)
   | {
       type: "history";
       messages: Array<
@@ -226,7 +237,11 @@ class TypeScriptTui {
   private threadId = "";
   private model = "-";
   private subagentModel = "-";
+  private reasoningEffort = "";
   private cwd = process.cwd();
+  private contextWindow = 128_000;
+  private estimatedTokens = 0;
+  private tokensLeftPercent = 100;
   private cursorRow = 0;
   private cursorCol = 0;
   private generating = false;
@@ -864,25 +879,21 @@ class TypeScriptTui {
   private handleBackendEvent(event: BackendEvent): void {
     switch (event.type) {
       case "hello":
-        this.threadId = event.thread_id;
-        this.model = event.model;
-        this.subagentModel = event.subagent_model;
-        this.cwd = event.cwd;
+        this.applyStatusPayload(event);
         if (this.resumeMode) {
           this.showSessionPicker = true;
           this.sendBackend({ type: "list_threads", source: "tui" });
         }
         break;
       case "status":
-        this.threadId = event.thread_id;
-        this.model = event.model;
-        this.subagentModel = event.subagent_model;
-        this.cwd = event.cwd;
+        this.applyStatusPayload(event);
         break;
       case "cleared":
         this.threadId = event.thread_id;
         this.history.length = 0;
         this.streaming = "";
+        this.estimatedTokens = 0;
+        this.tokensLeftPercent = 100;
         this.setGenerating(false);
         this.pendingPrompts.length = 0;
         this.selectedToolId = null;
@@ -1003,10 +1014,7 @@ class TypeScriptTui {
         }
         break;
       case "resumed":
-        this.threadId = event.thread_id;
-        this.model = event.model;
-        this.subagentModel = event.subagent_model;
-        this.cwd = event.cwd;
+        this.applyStatusPayload(event);
         this.history.length = 0;
         this.streaming = "";
         this.pendingPrompts.length = 0;
@@ -1037,6 +1045,17 @@ class TypeScriptTui {
         break;
     }
     this.render();
+  }
+
+  private applyStatusPayload(payload: StatusPayload): void {
+    this.threadId = payload.thread_id;
+    this.model = payload.model;
+    this.subagentModel = payload.subagent_model;
+    this.reasoningEffort = payload.reasoning_effort || "";
+    this.cwd = payload.cwd;
+    this.contextWindow = payload.context_window || 128_000;
+    this.estimatedTokens = Math.max(0, payload.estimated_tokens || 0);
+    this.tokensLeftPercent = Math.max(0, Math.min(100, payload.tokens_left_percent || 0));
   }
 
   private submitInput(): void {
@@ -2534,6 +2553,7 @@ class TypeScriptTui {
   }
 
   private renderFooter(width: number): string[] {
+    const statusLine = this.renderContextStatusLine(width);
     const state = this.generating ? "busy" : "idle";
     const queue = this.pendingPrompts.length > 0 ? `  queue ${this.pendingPrompts.length}` : "";
     const scroll = this.scrollOffset > 0 ? `  scroll +${this.scrollOffset}` : "";
@@ -2542,8 +2562,27 @@ class TypeScriptTui {
       : `  ${this.getNativeSelectionHint()}`;
     const wheelMode = this.xtermJsLike ? "wheel decay" : "wheel native";
     const nativeSelectionState = this.nativeSelectionMode ? "  native-select active" : "";
-    const text = `Enter submit  Shift+Enter newline  Ctrl+J/K tool  Ctrl+O expand  ${wheelMode}${selection}${nativeSelectionState}  ${state}${queue}  ${this.subagentModel}${scroll}`;
-    return ["", `${COLOR.secondary}${this.truncate(text, width)}${COLOR.reset}`];
+    const text = `Enter submit  Shift+Enter newline  Ctrl+J/K tool  Ctrl+O expand  ${wheelMode}${selection}${nativeSelectionState}  ${state}${queue}${scroll}`;
+    return ["", statusLine, `${COLOR.secondary}${this.truncate(text, width)}${COLOR.reset}`];
+  }
+
+  private renderContextStatusLine(width: number): string {
+    const modelLabel = [this.model, this.reasoningEffort].filter(Boolean).join(" ");
+    const leftText = `${this.tokensLeftPercent}% left`;
+    const cwd = this.tildePath(this.cwd);
+    const text = `${modelLabel || "-"} · ${leftText} · ${cwd}`;
+    return `${COLOR.secondary}${this.truncate(text, width)}${COLOR.reset}`;
+  }
+
+  private tildePath(target: string): string {
+    const home = process.env.HOME || "";
+    if (!home || !target.startsWith(home)) {
+      return target;
+    }
+    if (target === home) {
+      return "~";
+    }
+    return `~${target.slice(home.length)}`;
   }
 
   private decorateTranscriptLine(line: string): string {

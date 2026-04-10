@@ -18,7 +18,12 @@ from nocode_agent.config import (
     resolve_request_timeout,
 )
 from nocode_agent.log import setup_logging
-from nocode_agent.persistence import list_threads, load_thread_messages, resolve_checkpoint_path
+from nocode_agent.persistence import (
+    estimate_thread_tokens,
+    list_threads,
+    load_thread_messages,
+    resolve_checkpoint_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +65,27 @@ def _emit(event: dict[str, Any]) -> None:
 _stream_task: asyncio.Task | None = None
 
 
-async def _stream_prompt(agent, prompt: str) -> None:
+def _build_status_event(agent, config: dict[str, Any], event_type: str = "status") -> dict[str, Any]:
+    """构建发给 TUI 的状态快照。"""
+    db_path = resolve_checkpoint_path(config)
+    estimated_tokens = estimate_thread_tokens(db_path, thread_id=agent.thread_id)
+    context_window = max(1, int(getattr(agent, "context_window", 128_000) or 128_000))
+    tokens_left = max(0, context_window - estimated_tokens)
+    tokens_left_percent = max(0, min(100, round(tokens_left * 100 / context_window)))
+    return {
+        "type": event_type,
+        "thread_id": agent.thread_id,
+        "model": agent.model_name,
+        "subagent_model": agent.subagent_model_name,
+        "reasoning_effort": getattr(agent, "reasoning_effort", ""),
+        "cwd": os.getcwd(),
+        "context_window": context_window,
+        "estimated_tokens": estimated_tokens,
+        "tokens_left_percent": tokens_left_percent,
+    }
+
+
+async def _stream_prompt(agent, prompt: str, config: dict[str, Any]) -> None:
     logger.info("Prompt started: thread=%s, chars=%d", getattr(agent, "thread_id", "-"), len(prompt))
     try:
         async for event_type, *data in agent.chat(prompt):
@@ -123,6 +148,7 @@ async def _stream_prompt(agent, prompt: str) -> None:
         _emit({"type": "error", "message": f"stream error: {error}"})
     else:
         logger.info("Prompt finished: thread=%s", getattr(agent, "thread_id", "-"))
+    _emit(_build_status_event(agent, config))
     _emit({"type": "done"})
 
 
@@ -135,15 +161,7 @@ async def _handle_message(agent, payload: dict[str, Any], config: dict[str, Any]
         return True
 
     if message_type == "status":
-        _emit(
-            {
-                "type": "status",
-                "thread_id": agent.thread_id,
-                "model": agent.model_name,
-                "subagent_model": agent.subagent_model_name,
-                "cwd": os.getcwd(),
-            }
-        )
+        _emit(_build_status_event(agent, config))
         return True
 
     if message_type == "list_threads":
@@ -160,13 +178,7 @@ async def _handle_message(agent, payload: dict[str, Any], config: dict[str, Any]
             return True
         agent._thread_id = target_thread
         _emit(
-            {
-                "type": "resumed",
-                "thread_id": agent.thread_id,
-                "model": agent.model_name,
-                "subagent_model": agent.subagent_model_name,
-                "cwd": os.getcwd(),
-            }
+            _build_status_event(agent, config, event_type="resumed")
         )
         return True
 
@@ -196,13 +208,7 @@ async def main() -> int:
         return 1
 
     _emit(
-        {
-            "type": "hello",
-            "thread_id": agent.thread_id,
-            "model": agent.model_name,
-            "subagent_model": agent.subagent_model_name,
-            "cwd": os.getcwd(),
-        }
+        _build_status_event(agent, config, event_type="hello")
     )
 
     while True:
@@ -232,7 +238,7 @@ async def main() -> int:
                 await agent.enqueue_user_input(prompt)
                 _emit({"type": "prompt_queued", "text": prompt})
             else:
-                _stream_task = asyncio.create_task(_stream_prompt(agent, prompt))
+                _stream_task = asyncio.create_task(_stream_prompt(agent, prompt, config))
             continue
 
         if message_type == "question_answer":

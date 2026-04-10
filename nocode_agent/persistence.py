@@ -233,3 +233,30 @@ def load_thread_messages(db_path: str, thread_id: str) -> list[dict[str, Any]]:
         return results
     finally:
         db.close()
+
+
+def estimate_thread_tokens(db_path: str, thread_id: str) -> int:
+    """估算指定线程当前状态占用的 token 数量。"""
+    import sqlite3 as _sqlite3
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    from nocode_agent.compression.estimator import estimate_tokens
+
+    db_path = str(Path(db_path).expanduser())
+    if not Path(db_path).exists():
+        return 0
+
+    db = _sqlite3.connect(db_path)
+    try:
+        saver = SqliteSaver(db)
+        saver.setup()
+        state = saver.get({"configurable": {"thread_id": thread_id}})
+        if not state:
+            return 0
+        cv = state.get("channel_values", {})
+        msgs = cv.get("messages", [])
+        if not isinstance(msgs, list):
+            return 0
+        return estimate_tokens(msgs)
+    finally:
+        db.close()
