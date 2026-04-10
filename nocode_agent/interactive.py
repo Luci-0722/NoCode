@@ -34,12 +34,16 @@ class InteractiveSessionBroker:
     async def emit_inputs_injected(self, texts: list[str]) -> None:
         if not texts:
             return
-        await self._events.put(
+        await self.emit_event(
             {
                 "type": "queued_prompt_injected",
                 "texts": texts,
             }
         )
+
+    async def emit_event(self, event: dict[str, Any]) -> None:
+        """向前端发送一条运行时事件。"""
+        await self._events.put(event)
 
     async def ask_user_question(self, questions: list[dict[str, Any]]) -> str:
         loop = asyncio.get_running_loop()
@@ -62,6 +66,10 @@ class InteractiveSessionBroker:
             if future is None or future.done():
                 raise RuntimeError("当前没有待回答的问题。")
             future.set_result(answer)
+
+    async def wait_for_event(self) -> dict[str, Any]:
+        """等待下一条运行时事件。"""
+        return await self._events.get()
 
     async def drain_events(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []

@@ -185,14 +185,49 @@ class MainAgent:
 
         for attempt in range(max_retries + 1):
             saw_first_token = False
+            next_chunk_task: asyncio.Task[Any] | None = None
+            next_event_task: asyncio.Task[dict[str, Any]] | None = None
             try:
-                async for chunk in self._agent.astream(
+                stream_iter = self._agent.astream(
                     {"messages": [{"role": "user", "content": user_input}]},
                     config=config,
                     stream_mode=["messages", "updates"],
                     subgraphs=True,
                     version="v2",
-                ):
+                ).__aiter__()
+                next_chunk_task = asyncio.create_task(stream_iter.__anext__())
+                next_event_task = asyncio.create_task(self._interactive_broker.wait_for_event())
+
+                # 并发等待模型流和运行时事件，确保 auto-compact 在首 token 前也能立即同步到 TUI。
+                while next_chunk_task or next_event_task:
+                    pending_tasks = [
+                        task
+                        for task in (next_chunk_task, next_event_task)
+                        if task is not None
+                    ]
+                    if not pending_tasks:
+                        break
+
+                    done, _ = await asyncio.wait(
+                        pending_tasks,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+
+                    if next_event_task and next_event_task in done:
+                        event = next_event_task.result()
+                        yield ("runtime_event", event)
+                        next_event_task = asyncio.create_task(self._interactive_broker.wait_for_event())
+
+                    if not next_chunk_task or next_chunk_task not in done:
+                        continue
+
+                    try:
+                        chunk = next_chunk_task.result()
+                    except StopAsyncIteration:
+                        next_chunk_task = None
+                        break
+
+                    next_chunk_task = asyncio.create_task(stream_iter.__anext__())
                     namespace = tuple(chunk.get("ns", ()))
                     chunk_type = chunk.get("type")
 
@@ -237,9 +272,6 @@ class MainAgent:
                                     attempt + 1,
                                 )
                             yield ("text", token.text)
-                        runtime_events = await self._interactive_broker.drain_events()
-                        for event in runtime_events:
-                            yield ("runtime_event", event)
                         continue
 
                     if chunk_type != "updates":
@@ -329,9 +361,6 @@ class MainAgent:
                                         _render_tool_output(message.content),
                                         tool_call_id,
                                     )
-                        runtime_events = await self._interactive_broker.drain_events()
-                        for event in runtime_events:
-                            yield ("runtime_event", event)
 
                 # 流正常结束，退出重试循环
                 runtime_events = await self._interactive_broker.drain_events()
@@ -363,6 +392,16 @@ class MainAgent:
                 )
                 yield ("retry", str(exc), attempt + 1, max_retries, delay)
                 await asyncio.sleep(delay)
+            finally:
+                cancel_tasks = [
+                    task
+                    for task in (next_chunk_task, next_event_task)
+                    if task is not None and not task.done()
+                ]
+                for task in cancel_tasks:
+                    task.cancel()
+                if cancel_tasks:
+                    await asyncio.gather(*cancel_tasks, return_exceptions=True)
 
 
 # 已知模型的上下文窗口大小
@@ -415,6 +454,7 @@ def _build_middleware(
     context_window: int = 128_000,
     auto_compactor: AutoCompactor | None = None,
     sm_extractor: SessionMemoryExtractor | None = None,
+    interactive_broker: InteractiveSessionBroker | None = None,
 ):
     middleware: list[Any] = []
 
@@ -427,6 +467,7 @@ def _build_middleware(
             CompressionLifecycleMiddleware(
                 auto_compactor=auto_compactor,
                 sm_extractor=sm_extractor,
+                interactive_broker=interactive_broker,
             )
         )
 
@@ -701,13 +742,14 @@ async def create_mainagent(
             sm_extractor=sm_extractor,
         )
 
+    interactive_broker = InteractiveSessionBroker()
     middleware = _build_middleware(
         compression,
         context_window=context_window,
         auto_compactor=auto_compactor,
         sm_extractor=sm_extractor,
+        interactive_broker=interactive_broker,
     )
-    interactive_broker = InteractiveSessionBroker()
     main_middleware = [*middleware, PendingUserInputMiddleware(interactive_broker)]
 
     core_tools = build_core_tools(interactive_broker.ask_user_question)

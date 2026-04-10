@@ -22,6 +22,7 @@ from typing_extensions import override
 
 from nocode_agent.compression.auto_compact import AutoCompactor
 from nocode_agent.compression.session_memory import SessionMemoryExtractor
+from nocode_agent.interactive import InteractiveSessionBroker
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +34,11 @@ class CompressionLifecycleMiddleware(AgentMiddleware):
         self,
         auto_compactor: AutoCompactor | None = None,
         sm_extractor: SessionMemoryExtractor | None = None,
+        interactive_broker: InteractiveSessionBroker | None = None,
     ) -> None:
         self._auto_compactor = auto_compactor
         self._sm_extractor = sm_extractor
+        self._interactive_broker = interactive_broker
 
     @override
     async def abefore_model(
@@ -52,9 +55,14 @@ class CompressionLifecycleMiddleware(AgentMiddleware):
         if not self._auto_compactor.should_trigger(messages):
             return None
 
+        if self._interactive_broker:
+            await self._interactive_broker.emit_event({"type": "auto_compact_start"})
+
         logger.info("Auto-compact triggered in middleware, generating summary...")
         result = await self._auto_compactor.compact(messages)
         if result is None:
+            if self._interactive_broker:
+                await self._interactive_broker.emit_event({"type": "auto_compact_failed"})
             logger.warning("Auto-compact failed in middleware, will retry next turn")
             return None
 
@@ -69,6 +77,16 @@ class CompressionLifecycleMiddleware(AgentMiddleware):
         from nocode_agent.file_state import get_file_state_cache
 
         get_file_state_cache().clear()
+        if self._interactive_broker:
+            await self._interactive_broker.emit_event(
+                {
+                    "type": "auto_compact_done",
+                    "strategy": result.strategy,
+                    "pre_tokens": result.pre_tokens,
+                    "post_tokens": result.post_tokens,
+                    "files_restored": result.files_restored,
+                }
+            )
         return {
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),

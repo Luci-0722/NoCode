@@ -61,6 +61,7 @@ class CompactResult:
     pre_tokens: int
     post_tokens: int
     files_restored: int
+    strategy: str
 
 
 class FileReadTracker:
@@ -180,6 +181,7 @@ class AutoCompactor:
                         pre_tokens=pre_tokens,
                         post_tokens=post_tokens,
                         files_restored=self._count_restored_files(sm_result),
+                        strategy="session_memory",
                     )
 
             # ② 回退到 LLM 总结压缩
@@ -206,6 +208,7 @@ class AutoCompactor:
                 pre_tokens=pre_tokens,
                 post_tokens=post_tokens,
                 files_restored=self._count_restored_files(new_messages),
+                strategy="summary",
             )
 
         except Exception:

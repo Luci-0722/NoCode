@@ -87,6 +87,8 @@ type ThreadInfo = {
   source?: string;
 };
 
+type AutoCompactStrategy = "session_memory" | "summary";
+
 type QuestionOption = {
   label: string;
   description: string;
@@ -149,6 +151,15 @@ type BackendEvent =
   | { type: "error"; message: string }
   | { type: "fatal"; message: string }
   | { type: "cancelled" }
+  | { type: "auto_compact_start" }
+  | {
+      type: "auto_compact_done";
+      strategy: AutoCompactStrategy;
+      pre_tokens: number;
+      post_tokens: number;
+      files_restored: number;
+    }
+  | { type: "auto_compact_failed" }
   | { type: "prompt_queued"; text: string }
   | { type: "queued_prompt_injected"; texts: string[] }
   | { type: "thread_list"; threads: ThreadInfo[] }
@@ -204,6 +215,7 @@ const COLOR = {
 const SELECTION_BG = "\x1b[48;2;40;70;110m";
 
 class TypeScriptTui {
+  private readonly generatingSpinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   private readonly version = "NoCode";
   private readonly history: Message[] = [];
   private readonly inputLines: string[] = [""];
@@ -219,6 +231,7 @@ class TypeScriptTui {
   private cursorCol = 0;
   private generating = false;
   private generatingStartedAt = 0;
+  private autoCompactStartedAt = 0;
   private exiting = false;
   private lastFrame = "";
   private scrollOffset = 0;
@@ -265,7 +278,7 @@ class TypeScriptTui {
   private nativeSelectionMode = false;
   private nativeSelectionTimer: NodeJS.Timeout | null = null;
   private rawEscapeTimer: NodeJS.Timeout | null = null;
-  private generatingStatusTimer: NodeJS.Timeout | null = null;
+  private generatingAnimationTimer: NodeJS.Timeout | null = null;
 
   constructor() {
     this.resumeMode = process.argv.includes("--resume");
@@ -300,14 +313,28 @@ class TypeScriptTui {
   }
 
   private spawnBackend(): void {
-    const localPython = process.platform === "win32"
-      ? path.join(process.cwd(), ".venv", "Scripts", "python.exe")
-      : path.join(process.cwd(), ".venv", "bin", "python");
-    const python = process.env.PYTHON_BIN || (fs.existsSync(localPython) ? localPython : (process.platform === "win32" ? "python" : "python3"));
-    this.backend = spawn(python, ["-m", "nocode_agent.backend_stdio"], {
-      cwd: process.cwd(),
-      stdio: ["pipe", "pipe", "pipe"],  // stderr 也用 pipe，避免日志穿透 TUI
-    });
+    // 优先使用打包后的后端可执行文件
+    const exeDir = path.dirname(process.execPath);
+    const bundledBackend = process.platform === "win32"
+      ? path.join(exeDir, "nocode-backend.exe")
+      : path.join(exeDir, "nocode-backend");
+
+    if (fs.existsSync(bundledBackend)) {
+      this.backend = spawn(bundledBackend, [], {
+        cwd: process.cwd(),
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } else {
+      // 回退到 Python 方式
+      const localPython = process.platform === "win32"
+        ? path.join(process.cwd(), ".venv", "Scripts", "python.exe")
+        : path.join(process.cwd(), ".venv", "bin", "python");
+      const python = process.env.PYTHON_BIN || (fs.existsSync(localPython) ? localPython : (process.platform === "win32" ? "python" : "python3"));
+      this.backend = spawn(python, ["-m", "nocode_agent.backend_stdio"], {
+        cwd: process.cwd(),
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    }
 
     this.backend.stdout.setEncoding("utf8");
     // 消费 stderr 避免 buffer 满阻塞，但不显示（避免穿透 TUI）
@@ -328,7 +355,7 @@ class TypeScriptTui {
               role: "system",
               content: `invalid backend event: ${message}\n${line}`,
             });
-            this.generating = false;
+            this.setGenerating(false);
             this.render();
           }
         }
@@ -345,7 +372,7 @@ class TypeScriptTui {
         role: "system",
         content: `backend exited with code ${code ?? "unknown"}`,
       });
-      this.generating = false;
+      this.setGenerating(false);
       this.render();
     });
   }
@@ -856,6 +883,7 @@ class TypeScriptTui {
         this.threadId = event.thread_id;
         this.history.length = 0;
         this.streaming = "";
+        this.setGenerating(false);
         this.pendingPrompts.length = 0;
         this.selectedToolId = null;
         this.followLatestTool = true;
@@ -863,9 +891,11 @@ class TypeScriptTui {
         this.clearSelection();
         break;
       case "text":
+        this.stopAutoCompact();
         this.streaming += event.delta;
         break;
       case "tool_start":
+        this.stopAutoCompact();
         this.flushStreamingToHistory();
         this.startToolRun(event.name, event.args, event.tool_call_id);
         break;
@@ -874,9 +904,11 @@ class TypeScriptTui {
         break;
       }
       case "subagent_start":
+        this.stopAutoCompact();
         this.startSubagentRun(event.parent_tool_call_id, event.subagent_id, event.subagent_type, event.thread_id);
         break;
       case "subagent_tool_start":
+        this.stopAutoCompact();
         this.startSubagentToolRun(
           event.parent_tool_call_id,
           event.subagent_id,
@@ -903,6 +935,7 @@ class TypeScriptTui {
         );
         break;
       case "question":
+        this.stopAutoCompact();
         this.flushStreamingToHistory();
         this.questionMode = true;
         this.activeQuestions = event.questions;
@@ -912,6 +945,13 @@ class TypeScriptTui {
         this.otherMode = false;
         this.otherText = "";
         this.questionAnswers = [];
+        break;
+      case "auto_compact_start":
+        this.startAutoCompact();
+        break;
+      case "auto_compact_done":
+      case "auto_compact_failed":
+        this.stopAutoCompact();
         break;
       case "done":
         this.flushStreamingToHistory();
@@ -1093,40 +1133,57 @@ class TypeScriptTui {
     this.sendBackend({ type: "prompt", text });
   }
 
+  private startAutoCompact(): void {
+    if (this.autoCompactStartedAt === 0) {
+      this.autoCompactStartedAt = Date.now();
+    }
+    this.setGenerating(true);
+  }
+
+  private stopAutoCompact(): void {
+    this.autoCompactStartedAt = 0;
+  }
+
   private setGenerating(next: boolean): void {
-    this.generating = next;
     if (next) {
-      this.generatingStartedAt = Date.now();
-      if (!this.generatingStatusTimer) {
-        // 定时刷新等待态文案，避免长时间无事件时界面“假死”。
-        this.generatingStatusTimer = setInterval(() => {
-          if (!this.generating) {
-            return;
+      this.generating = true;
+      if (this.generatingStartedAt === 0) {
+        this.generatingStartedAt = Date.now();
+      }
+      if (!this.generatingAnimationTimer) {
+        // 生成过程中主动刷新 header，保证 spinner 和耗时持续更新。
+        this.generatingAnimationTimer = setInterval(() => {
+          if (this.generating && !this.exiting) {
+            this.render();
           }
-          this.render();
-        }, 1000);
+        }, 80);
       }
       return;
     }
 
+    this.generating = false;
     this.generatingStartedAt = 0;
-    if (this.generatingStatusTimer) {
-      clearInterval(this.generatingStatusTimer);
-      this.generatingStatusTimer = null;
+    this.stopAutoCompact();
+    if (this.generatingAnimationTimer) {
+      clearInterval(this.generatingAnimationTimer);
+      this.generatingAnimationTimer = null;
     }
   }
 
-  private renderGeneratingPlaceholder(): string {
-    if (this.streaming) {
-      return this.streaming;
+  private renderGeneratingStatus(width: number): string {
+    if (!this.generating || this.questionMode || this.showSessionPicker || width < 12) {
+      return "";
     }
-    const elapsedSeconds = this.generatingStartedAt > 0
-      ? Math.max(0, Math.floor((Date.now() - this.generatingStartedAt) / 1000))
-      : 0;
-    if (elapsedSeconds >= 10) {
-      return `等待模型响应中... 已等待 ${elapsedSeconds}s\n可按 Esc 中断当前请求`;
-    }
-    return "思考中...";
+
+    const autoCompactActive = this.autoCompactStartedAt > 0;
+    const startedAt = autoCompactActive ? this.autoCompactStartedAt : this.generatingStartedAt;
+    const elapsedMs = startedAt > 0 ? Date.now() - startedAt : 0;
+    const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+    const frameIndex = Math.floor(elapsedMs / 80) % this.generatingSpinnerFrames.length;
+    const frame = this.generatingSpinnerFrames[frameIndex] ?? this.generatingSpinnerFrames[0];
+    const label = autoCompactActive ? "正在压缩上下文" : "正在处理中";
+    const text = `${COLOR.warning}${COLOR.bold}${frame}${COLOR.reset} ${COLOR.bold}${label}${COLOR.reset} ${COLOR.secondary}(${elapsedSeconds}s · esc 可中断)${COLOR.reset}`;
+    return this.truncateAnsiAware(text, Math.max(12, width));
   }
 
   private dispatchNextQueuedPrompt(): void {
@@ -1905,10 +1962,11 @@ class TypeScriptTui {
       "█ ▀ █  █  █",
       "▀   ▀  ▀██▀",
     ];
+    const generatingStatus = this.renderGeneratingStatus(width - this.visibleLength(logo[2]) - 2);
     return [
       `${COLOR.accent}${COLOR.bold}${logo[0]}${COLOR.reset}  ${COLOR.secondary}${this.truncate(meta, Math.max(12, width - 16))}${COLOR.reset}`,
       `${COLOR.accent}${COLOR.bold}${logo[1]}${COLOR.reset}  ${COLOR.secondary}${cwd}${COLOR.reset}`,
-      `${COLOR.accent}${COLOR.bold}${logo[2]}${COLOR.reset}`,
+      `${COLOR.accent}${COLOR.bold}${logo[2]}${COLOR.reset}${generatingStatus ? `  ${generatingStatus}` : ""}`,
     ];
   }
 
@@ -1941,12 +1999,12 @@ class TypeScriptTui {
       lines.push("");
     }
 
-    if (this.streaming || this.generating) {
+    if (this.streaming) {
       lines.push(...this.renderHistoryEntry({
         id: -1,
         kind: "message",
         role: "assistant",
-        content: this.renderGeneratingPlaceholder(),
+        content: this.streaming,
       }, width));
       lines.push("");
     }
@@ -2686,13 +2744,14 @@ class TypeScriptTui {
   }
 
   private shutdown(): void {
+    this.setGenerating(false);
     if (this.rawEscapeTimer) {
       clearTimeout(this.rawEscapeTimer);
       this.rawEscapeTimer = null;
     }
-    if (this.generatingStatusTimer) {
-      clearInterval(this.generatingStatusTimer);
-      this.generatingStatusTimer = null;
+    if (this.generatingAnimationTimer) {
+      clearInterval(this.generatingAnimationTimer);
+      this.generatingAnimationTimer = null;
     }
     if (this.nativeSelectionTimer) {
       clearTimeout(this.nativeSelectionTimer);
