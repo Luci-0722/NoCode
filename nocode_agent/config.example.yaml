@@ -14,6 +14,14 @@ api_key: "YOUR_API_KEY_HERE"
 # base_url: "https://coding.dashscope.aliyuncs.com/v1"
 # api_key: "YOUR_SK_SP_API_KEY"
 
+## 阿里百炼 Claude Code 代理（Anthropic 风格 URL）
+# 注意：当前运行时仍然使用 OpenAI 兼容客户端，如果目标服务要求原生 Anthropic `/v1/messages`
+# 协议，则还需要额外适配调用客户端。
+# model: claude-sonnet-4-5
+# base_url: "https://dashscope.aliyuncs.com/api/v2/apps/claude-code-proxy"
+# 推荐使用环境变量，避免把密钥写入文件：
+# export ANTHROPIC_API_KEY="YOUR_API_KEY"
+
 ## Ollama 本地配置
 # model: qwen2.5-coder:14b
 # base_url: "http://127.0.0.1:11434/v1"

@@ -72,9 +72,15 @@ def _is_local_base_url(base_url: str) -> bool:
 
 def _provider_from_base_url(base_url: str) -> str:
     """根据 base_url 推断当前模型供应商。"""
-    host = (urlparse(str(base_url or "").strip()).hostname or "").strip().lower()
+    parsed = urlparse(str(base_url or "").strip())
+    host = (parsed.hostname or "").strip().lower()
+    path = (parsed.path or "").strip().lower()
     if not host:
         return ""
+    if "anthropic.com" in host:
+        return "anthropic"
+    if "dashscope.aliyuncs.com" in host and "claude-code-proxy" in path:
+        return "anthropic"
     if "dashscope.aliyuncs.com" in host:
         return "dashscope"
     if "bigmodel.cn" in host:
@@ -92,7 +98,9 @@ def resolve_api_key(config: dict[str, Any]) -> str:
     """
     provider = _provider_from_base_url(str(config.get("base_url", "") or ""))
     env_candidates: list[str] = ["NOCODE_API_KEY"]
-    if provider == "dashscope":
+    if provider == "anthropic":
+        env_candidates.extend(["ANTHROPIC_API_KEY", "DASHSCOPE_API_KEY", "BAILIAN_API_KEY"])
+    elif provider == "dashscope":
         env_candidates.extend(["DASHSCOPE_API_KEY", "BAILIAN_API_KEY"])
     elif provider == "zhipu":
         env_candidates.append("ZHIPU_API_KEY")
@@ -103,6 +111,7 @@ def resolve_api_key(config: dict[str, Any]) -> str:
             [
                 "DASHSCOPE_API_KEY",
                 "BAILIAN_API_KEY",
+                "ANTHROPIC_API_KEY",
                 "OPENAI_API_KEY",
                 "ZHIPU_API_KEY",
                 "OLLAMA_API_KEY",

@@ -183,7 +183,7 @@ class ACPAgentPool:
         if not api_key:
             raise RuntimeError(
                 "missing API key: set NOCODE_API_KEY/DASHSCOPE_API_KEY/BAILIAN_API_KEY/"
-                "OPENAI_API_KEY/OLLAMA_API_KEY/ZHIPU_API_KEY, or configure api_key"
+                "ANTHROPIC_API_KEY/OPENAI_API_KEY/OLLAMA_API_KEY/ZHIPU_API_KEY, or configure api_key"
             )
         self._api_key = api_key
 

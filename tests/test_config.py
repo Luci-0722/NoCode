@@ -90,3 +90,28 @@ def test_resolve_api_key_prefers_config_for_dashscope_over_unrelated_zhipu_env(m
             "api_key": "dashscope-config-secret",
         }
     ) == "dashscope-config-secret"
+
+
+def test_resolve_api_key_supports_anthropic_env(monkeypatch) -> None:
+    monkeypatch.delenv("NOCODE_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.delenv("BAILIAN_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+
+    assert resolve_api_key({"base_url": "https://api.anthropic.com/v1"}) == "anthropic-secret"
+
+
+def test_resolve_api_key_supports_dashscope_claude_proxy_env(monkeypatch) -> None:
+    monkeypatch.delenv("NOCODE_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("BAILIAN_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-secret")
+
+    assert (
+        resolve_api_key({"base_url": "https://dashscope.aliyuncs.com/api/v2/apps/claude-code-proxy"})
+        == "dashscope-secret"
+    )

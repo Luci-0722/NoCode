@@ -32,7 +32,7 @@ async def _build_agent(config: dict[str, Any]):
     if not api_key:
         raise RuntimeError(
             "missing API key: set NOCODE_API_KEY/DASHSCOPE_API_KEY/BAILIAN_API_KEY/"
-            "OPENAI_API_KEY/OLLAMA_API_KEY/ZHIPU_API_KEY, or configure api_key"
+            "ANTHROPIC_API_KEY/OPENAI_API_KEY/OLLAMA_API_KEY/ZHIPU_API_KEY, or configure api_key"
         )
 
     return await create_mainagent(
