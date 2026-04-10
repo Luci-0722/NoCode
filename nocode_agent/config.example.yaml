@@ -18,7 +18,7 @@ api_key: "YOUR_API_KEY_HERE"
 # 注意：当前运行时仍然使用 OpenAI 兼容客户端，如果目标服务要求原生 Anthropic `/v1/messages`
 # 协议，则还需要额外适配调用客户端。
 # model: claude-sonnet-4-5
-# base_url: "https://dashscope.aliyuncs.com/api/v2/apps/claude-code-proxy"
+# base_url: "https://coding.dashscope.aliyuncs.com/apps/anthropic"
 # 推荐使用环境变量，避免把密钥写入文件：
 # export ANTHROPIC_API_KEY="YOUR_API_KEY"
 
